@@ -1,0 +1,44 @@
+data:
+  qlib_data_dir: "./qlib_data/cn_data"
+  cache_dir: "./data/cache"
+  start_date: "2018-01-01"
+  end_date: "2023-12-31"
+
+event:
+  limit_up_threshold: 9.9    # 涨停阈值%
+  exclude_st: true            # 排除ST股
+  second_board_days: 5        # 二板判定窗口（交易日）
+  main_wave_days: 10         # 主升浪观察窗口（交易日）
+  main_wave_return: 0.15     # 主升浪涨幅阈值
+
+feature:
+  pre_trend_window_1m: 20    # 涨停前1个月窗口
+  pre_trend_window_2m: 40    # 涨停前2个月窗口
+  price_volume:
+    returns_n: [1, 3, 5, 10, 20]
+    volume_rolling_n: [5, 10]
+    ma_n: [20, 60, 120]
+    volatility_n: [5, 10]
+  limit_up:
+    history_days: [20, 60]
+
+model:
+  type: "lightgbm"
+  params:
+    num_leaves: 31
+    learning_rate: 0.05
+    n_estimators: 100
+    verbose: -1
+
+dataset:
+  test_ratio: 0.2
+  valid_ratio: 0.1
+
+backtest:
+  start_date: "2022-01-01"
+  end_date: "2023-12-31"
+  initial_cash: 10000000
+  benchmark: "SH000300"
+  topk: 10
+  sell_n: 5
+  slippage: 0.003
