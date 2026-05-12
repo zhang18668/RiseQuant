@@ -29,7 +29,13 @@ class PerformanceAnalyzer:
             return self._empty_metrics()
 
         df = equity_curve.sort_values("date").reset_index(drop=True)
-        equity = df["equity"].astype(float)
+        # 兼容两种列名：``equity`` (旧) 与 ``total_value`` (新)
+        if "total_value" in df.columns:
+            equity = df["total_value"].astype(float)
+        elif "equity" in df.columns:
+            equity = df["equity"].astype(float)
+        else:
+            return self._empty_metrics()
         if (equity <= 0).any() or len(equity) < 2:
             return self._empty_metrics()
 

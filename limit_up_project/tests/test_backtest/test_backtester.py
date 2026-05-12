@@ -43,7 +43,7 @@ class TestBacktester:
         # 创建信号
         dates = pd.date_range("2023-01-01", periods=10, freq="B").strftime("%Y-%m-%d")
         signals = pd.DataFrame({
-            "date": dates * 3,
+            "date": list(dates) * 3,
             "code": ["000001", "000002", "000003"] * 10,
             "score": np.random.rand(30),
         })

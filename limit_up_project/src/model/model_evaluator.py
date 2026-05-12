@@ -112,3 +112,14 @@ class ModelEvaluator:
             if isinstance(v, float):
                 lines.append(f"  {k:>9}: {v:.4f}")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # 别名接口 (与 README / scripts 中保持一致)
+    # ------------------------------------------------------------------
+    def evaluate_multiclass(self, y_true, y_pred, y_proba=None) -> Dict[str, object]:
+        """:meth:`evaluate` 的别名, 显式标注多分类语义."""
+        return self.evaluate(y_true, y_pred, y_proba)
+
+    def get_metrics_summary(self, metrics: Dict[str, object]) -> str:
+        """:meth:`format_summary` 的别名."""
+        return self.format_summary(metrics)

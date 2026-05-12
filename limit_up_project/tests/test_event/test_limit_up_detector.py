@@ -31,7 +31,8 @@ class TestLimitUpDetector:
     def test_detect_returns_correct_columns(self, sample_daily_data):
         det = LimitUpEventDetector()
         events = det.detect(sample_daily_data)
-        assert set(events.columns) == {"date", "code", "change_pct", "is_limit_up"}
+        # 至少包含核心列, 允许额外的 limit_up_type / consecutive_n 等扩展列
+        assert set(events.columns) >= {"date", "code", "change_pct", "is_limit_up"}
 
     def test_detect_filters_correctly(self, sample_daily_data):
         det = LimitUpEventDetector()

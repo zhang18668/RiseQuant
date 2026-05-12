@@ -1,19 +1,22 @@
 """M-001 模型训练器 (LightGBM 多分类)
 
-封装一个最小可用的训练器：
-- ``train(X_train, y_train, X_valid=None, y_valid=None)``
+封装一个最小可用的训练器:
+- ``train(X_train, y_train, X_valid=None, y_valid=None, feature_names=None)``
 - ``predict(X)``  -> 类别 (np.ndarray[int])
 - ``predict_proba(X)`` -> 概率矩阵 (np.ndarray[float, shape=(n, n_classes)])
 - ``save(path)`` / ``load(path)``
+- ``feature_importance()`` / ``get_feature_importance()`` -> pd.DataFrame
+- ``self.config`` -> 训练参数字典 (含 ``objective`` 等键)
 
-参数从 ``config["model"]["params"]`` 取，缺省提供保守的默认值。
+参数从 ``config["model"]["params"]`` 取 (允许只传 ``params`` 字典),
+缺省提供保守的默认值.
 """
 
 from __future__ import annotations
 
 import pickle
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -31,7 +34,7 @@ logger = get_logger(__name__)
 
 
 class LimitUpModelTrainer:
-    """LightGBM 多分类训练器。"""
+    """LightGBM 多分类训练器."""
 
     DEFAULT_PARAMS: Dict[str, Any] = {
         "objective": "multiclass",
@@ -43,15 +46,18 @@ class LimitUpModelTrainer:
     }
 
     def __init__(self, config: Optional[dict] = None) -> None:
-        if not _HAS_LGB:
-            raise ImportError("lightgbm is required for LimitUpModelTrainer")
         cfg = config or {}
         params = dict(self.DEFAULT_PARAMS)
         if isinstance(cfg, dict):
+            # 同时兼容 ``{"params": {...}}`` 与 ``{"model": {"params": {...}}}``
+            if "params" in cfg:
+                params.update(cfg.get("params", {}))
             params.update(cfg.get("model", {}).get("params", {}))
-        self.params = params
-        self.model: Optional[lgb.LGBMClassifier] = None
-        self.feature_names_: Optional[list] = None
+        # 提供 ``self.config`` 别名, 方便外部读取
+        self.params: Dict[str, Any] = params
+        self.config: Dict[str, Any] = params
+        self.model = None  # type: ignore
+        self.feature_names_: Optional[List[str]] = None
         self.classes_: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------
@@ -61,16 +67,20 @@ class LimitUpModelTrainer:
         y_train: pd.Series,
         X_valid: Optional[pd.DataFrame] = None,
         y_valid: Optional[pd.Series] = None,
-    ) -> "LimitUpModelTrainer":
+        feature_names: Optional[List[str]] = None,
+    ):
+        if not _HAS_LGB:
+            raise ImportError("lightgbm is required for LimitUpModelTrainer.train()")
+
         if len(X_train) == 0:
             raise ValueError("empty training data")
-        n_classes = int(pd.Series(y_train).nunique())
-        params = dict(self.params)
-        params["num_class"] = max(n_classes, 2) if params.get("objective") == "multiclass" else None
-        params = {k: v for k, v in params.items() if v is not None}
 
-        # 使用 sklearn API 更简洁
-        model_params = {k: v for k, v in params.items() if k not in ("objective", "num_class")}
+        y_series = pd.Series(y_train)
+        n_classes = int(y_series.nunique())
+
+        model_params = {
+            k: v for k, v in self.params.items() if k not in ("objective", "num_class")
+        }
         if n_classes <= 2:
             model_params["objective"] = "binary"
         else:
@@ -78,15 +88,21 @@ class LimitUpModelTrainer:
             model_params["num_class"] = n_classes
 
         self.model = lgb.LGBMClassifier(**model_params)
-        eval_set = [(X_valid, y_valid)] if X_valid is not None and y_valid is not None else None
-        self.model.fit(
-            X_train, y_train,
-            eval_set=eval_set,
+        eval_set = (
+            [(X_valid, y_valid)]
+            if X_valid is not None and y_valid is not None
+            else None
         )
-        self.feature_names_ = list(X_train.columns)
+        self.model.fit(X_train, y_train, eval_set=eval_set)
+        self.feature_names_ = (
+            list(feature_names) if feature_names is not None else list(X_train.columns)
+        )
         self.classes_ = self.model.classes_
-        logger.info(f"trained LGBM with {len(X_train)} samples, {len(self.feature_names_)} features")
-        return self
+        logger.info(
+            f"trained LGBM with {len(X_train)} samples, "
+            f"{len(self.feature_names_)} features"
+        )
+        return self.model
 
     # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> np.ndarray:
@@ -121,6 +137,7 @@ class LimitUpModelTrainer:
 
     # ------------------------------------------------------------------
     def feature_importance(self) -> pd.Series:
+        """返回 (按重要性降序的) ``pd.Series``: index=feature_name."""
         self._check_fitted()
         importances = pd.Series(
             self.model.feature_importances_,
@@ -128,6 +145,15 @@ class LimitUpModelTrainer:
             name="importance",
         )
         return importances.sort_values(ascending=False)
+
+    def get_feature_importance(self, top_n: Optional[int] = None) -> pd.DataFrame:
+        """返回宽表 ``feature, importance`` (按重要性降序)."""
+        s = self.feature_importance()
+        df = s.reset_index()
+        df.columns = ["feature", "importance"]
+        if top_n is not None:
+            df = df.head(int(top_n))
+        return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------
     def _check_fitted(self) -> None:

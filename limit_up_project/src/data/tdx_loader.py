@@ -191,3 +191,61 @@ class TDXDataLoader:
     def parse_bytes(data: bytes) -> pd.DataFrame:
         """暴露解析逻辑给测试。"""
         return _parse_day_bytes(data)
+
+
+# ----------------------------------------------------------------------
+# 便捷扩展: 股票列表 / 板块判定 / 模块级函数
+# ----------------------------------------------------------------------
+def _add_stock_list_method():  # pragma: no cover - 在模块导入时挂到类上
+    def load_stock_list(self, market: str = "sh") -> pd.DataFrame:
+        """枚举 ``market`` 子目录下的 ``.day`` 文件, 提取股票代码列表.
+
+        返回列 ``code, market`` (按 ``code`` 升序).
+        """
+        if not self.data_path:
+            return pd.DataFrame(columns=["code", "market"])
+        market = market.lower()
+        day_dir = self.data_path / market / "lday"
+        if not day_dir.exists():
+            return pd.DataFrame(columns=["code", "market"])
+        codes: List[str] = []
+        for f in day_dir.iterdir():
+            name = f.name
+            # ``sh600000.day`` -> ``600000``
+            if name.endswith(".day") and name.startswith(market):
+                c = name[len(market):-len(".day")]
+                if c.isdigit():
+                    codes.append(c.zfill(6))
+        codes.sort()
+        return pd.DataFrame({"code": codes, "market": market})
+
+    @staticmethod
+    def is_main_board(code: str) -> bool:
+        """主板判断 (排除创业板 300xxx, 科创板 688xxx, 北交所 8/4 开头)."""
+        c = str(code).zfill(6)
+        if c.startswith(("300", "301")):  # 创业板
+            return False
+        if c.startswith("688"):  # 科创板
+            return False
+        if c.startswith(("4", "8", "9")):  # 北交所 / 部分指数
+            return False
+        if c.startswith(("60", "00", "001", "002", "003")):
+            return True
+        return False
+
+    TDXDataLoader.load_stock_list = load_stock_list  # type: ignore[attr-defined]
+    TDXDataLoader.is_main_board = is_main_board  # type: ignore[attr-defined]
+
+
+_add_stock_list_method()
+
+
+def load_tdx_data(
+    codes: Iterable[str],
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    data_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """便捷的模块级函数: 直接加载若干股票的日线."""
+    loader = TDXDataLoader(data_path=data_path)
+    return loader.load_batch(codes, start_date=start_date, end_date=end_date)

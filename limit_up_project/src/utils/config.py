@@ -134,3 +134,11 @@ def load_config(config_path: Optional[str] = None) -> Config:
     merged = default_config()
     _deep_update(merged, raw)
     return Config(merged)
+
+
+# ----------------------------------------------------------------------
+# 别名: 与 README / scripts 中保持一致
+# ----------------------------------------------------------------------
+def get_config(config_path: Optional[str] = None) -> Config:
+    """:func:`load_config` 的别名."""
+    return load_config(config_path)
