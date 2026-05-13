@@ -77,6 +77,8 @@ class Position:
     current_price: float = 0.0
     buy_date: Optional[pd.Timestamp] = None
     holding_days: int = 0
+    high_watermark: float = 0.0           # 持仓期间到达过的最高价 (移动止盈用)
+    dynamic_stop_price: float = 0.0       # 动态止损价 (跌破即出, 由信号附带)
 
     @property
     def market_value(self) -> float:
@@ -111,12 +113,23 @@ class Backtester:
         slippage: float = 0.003,
         commission: float = 0.0,
         entry_delay: int = 1,
+        # ---- 风控扩展 ----
+        stop_loss: float = 0.0,        # 硬止损, 例如 0.03 表示 -3% 立即出场
+        take_profit: float = 0.0,      # 硬止盈, 例如 0.10 表示 +10% 兑现
+        trailing_stop: float = 0.0,    # 移动止盈, 例如 0.05 表示从最高点回撤 5% 出场
+        min_score: float = 0.0,        # 概率阈值: 信号 score < min_score 不买
+        skip_zhangting_open: bool = True,  # T+1 一字涨停 (open>=9.5%) 买不进
     ) -> None:
         self.initial_cash = float(initial_cash)
         self.topk = int(topk)
         self.sell_n = int(sell_n)
         self.slippage = float(slippage)
         self.commission = float(commission)
+        self.stop_loss = float(stop_loss)
+        self.take_profit = float(take_profit)
+        self.trailing_stop = float(trailing_stop)
+        self.min_score = float(min_score)
+        self.skip_zhangting_open = bool(skip_zhangting_open)
         # 信号 -> 撮合的交易日延迟 (>=1 杜绝未来函数, 信号日 T 在 T+entry_delay 开盘成交)
         if int(entry_delay) < 0:
             raise ValueError("entry_delay must be >= 0")
@@ -212,23 +225,57 @@ class Backtester:
 
             holding = self._holding_days(pos.buy_date, current_date, all_dates)
             pos.holding_days = holding
-            pos.current_price = float(row["close"])
+            # 用当日 low/high 判定盘中触发止损/止盈, 用 close 更新当前价
+            day_high = float(row["high"]) if "high" in row.index else float(row["close"])
+            day_low  = float(row["low"])  if "low"  in row.index else float(row["close"])
+            day_close = float(row["close"])
+            pos.current_price = day_close
+            # 维护持仓期间最高价 (用每日 high)
+            pos.high_watermark = max(pos.high_watermark, day_high) if pos.high_watermark else day_high
 
-            if holding >= self.sell_n:
-                sell_price = float(row["close"])
+            # ---- 判定卖出条件 ----
+            sell_reason: Optional[str] = None
+            sell_price: float = day_close
+
+            ret_to_close = (day_close / pos.avg_cost - 1.0) if pos.avg_cost > 0 else 0.0
+            ret_to_low   = (day_low   / pos.avg_cost - 1.0) if pos.avg_cost > 0 else 0.0
+            ret_to_high  = (day_high  / pos.avg_cost - 1.0) if pos.avg_cost > 0 else 0.0
+
+            # 0) 动态止损: 当日 low 跌破信号附带的 stop_loss_price 即出
+            if pos.dynamic_stop_price > 0 and day_low <= pos.dynamic_stop_price:
+                sell_reason = "STOP_DYNAMIC"
+                sell_price = pos.dynamic_stop_price
+            # 1) 硬止损 (按当日 low 触发, 成交价 = 触发价)
+            elif self.stop_loss > 0 and ret_to_low <= -self.stop_loss:
+                sell_reason = "STOP_LOSS"
+                sell_price = pos.avg_cost * (1.0 - self.stop_loss)
+            # 2) 硬止盈 (按当日 high 触发)
+            elif self.take_profit > 0 and ret_to_high >= self.take_profit:
+                sell_reason = "TAKE_PROFIT"
+                sell_price = pos.avg_cost * (1.0 + self.take_profit)
+            # 3) 移动止盈: 从 high_watermark 回撤超过阈值
+            elif self.trailing_stop > 0 and pos.high_watermark > 0:
+                drawdown = day_close / pos.high_watermark - 1.0
+                if drawdown <= -self.trailing_stop:
+                    sell_reason = "TRAILING_STOP"
+                    sell_price = day_close
+            # 4) 时间止损 (默认逻辑保留)
+            if sell_reason is None and holding >= self.sell_n:
+                sell_reason = "TIME_STOP"
+                sell_price = day_close
+
+            if sell_reason is not None:
                 amount = sell_price * pos.quantity
                 commission_cost = amount * self.commission
                 proceeds = amount - commission_cost
                 pnl = (sell_price - pos.avg_cost) * pos.quantity - commission_cost
-                return_pct = (
-                    (sell_price / pos.avg_cost - 1.0) if pos.avg_cost > 0 else 0.0
-                )
+                return_pct = (sell_price / pos.avg_cost - 1.0) if pos.avg_cost > 0 else 0.0
                 self.cash += proceeds
                 self.trades.append(
                     Trade(
                         date=self._fmt_date(current_date),
                         code=pos.code,
-                        action="SELL",
+                        action=f"SELL_{sell_reason}",
                         price=sell_price,
                         quantity=pos.quantity,
                         amount=amount,
@@ -269,6 +316,9 @@ class Backtester:
         day_signals = signals[signals["date"] == signal_date].sort_values(
             "score", ascending=False
         )
+        # 概率阈值过滤
+        if self.min_score > 0:
+            day_signals = day_signals[day_signals["score"] >= self.min_score]
         if day_signals.empty:
             return
         held_codes = {p.code for p in self.positions}
@@ -285,9 +335,21 @@ class Backtester:
                 continue
             if (current_date, code) not in daily_idx.index:
                 continue
-            open_price = float(daily_idx.loc[(current_date, code), "open"])
+            row = daily_idx.loc[(current_date, code)]
+            open_price = float(row["open"])
             if open_price <= 0:
                 continue
+
+            # 一字/秒板涨停: 实盘买不进
+            if self.skip_zhangting_open:
+                # 找到 signal_date 的 close 作为参考
+                if (signal_date, code) in daily_idx.index:
+                    ref_close = float(daily_idx.loc[(signal_date, code), "close"])
+                    if ref_close > 0:
+                        gap_pct = open_price / ref_close - 1.0
+                        if gap_pct >= 0.095:
+                            continue
+
             slip_amount = open_price * self.slippage
             buy_price = open_price + slip_amount
             if buy_price <= 0:
@@ -301,6 +363,12 @@ class Backtester:
             if cost > self.cash + 1e-9:
                 continue
             self.cash -= cost
+            # 信号附带的动态止损价 (如首板 open)
+            dynamic_stop = 0.0
+            if "stop_loss_price" in sig.index:
+                v = sig["stop_loss_price"]
+                if pd.notna(v) and float(v) > 0:
+                    dynamic_stop = float(v)
             self.positions.append(
                 Position(
                     code=code,
@@ -309,6 +377,8 @@ class Backtester:
                     current_price=buy_price,
                     buy_date=pd.Timestamp(current_date),
                     holding_days=0,
+                    high_watermark=buy_price,
+                    dynamic_stop_price=dynamic_stop,
                 )
             )
             self.trades.append(

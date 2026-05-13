@@ -7,6 +7,7 @@
     python scripts/run_pipeline.py
 """
 import sys
+import argparse
 from pathlib import Path
 
 # 添加项目根目录到路径
@@ -38,6 +39,7 @@ from src.dataset.sector_split import SectorStockSplitter
 # 模型
 from src.model.model_trainer import LimitUpModelTrainer
 from src.model.model_evaluator import ModelEvaluator
+from src.model.model_registry import ModelRegistry
 
 # 回测
 from src.backtest.backtester import Backtester
@@ -45,8 +47,9 @@ from src.backtest.backtester import Backtester
 # 数据加载
 from src.data.tdx_loader import TDXDataLoader, load_tdx_data
 
-# 防未来函数校验器
+# 防未来函数校验器 + 运行档案
 from src.utils.validator import LookAheadValidator
+from src.utils.run_archive import RunArchive
 
 # 设置日志
 setup_logger(log_level="INFO")
@@ -220,46 +223,33 @@ def calculate_features(
         pd.DataFrame: 带特征的样本
     """
     logger.info("=" * 50)
-    logger.info("Step 5: 计算涨停前走势特征")
+    logger.info("Step 5: 计算特征 (PreTrend + Technical + Market)")
     logger.info("=" * 50)
 
-    pre_trend_calc = PreTrendFeatures(
-        window_1m=config.get("pre_trend_window_1m", 20),
-        window_2m=config.get("pre_trend_window_2m", 40),
-    )
+    from src.feature.feature_calculator import FeatureCalculator
+    fc = FeatureCalculator(config={
+        "feature": {
+            "pre_trend_window_1m": config.get("pre_trend_window_1m", 20),
+            "pre_trend_window_2m": config.get("pre_trend_window_2m", 40),
+            "use_technical": config.get("use_technical", True),
+            "use_market":    config.get("use_market", True),
+        },
+        "event": {"limit_up_threshold": config.get("limit_up_threshold", 9.9)},
+    })
 
-    features_list = []
+    # 准备 events 表 (FeatureCalculator 需要 event_date 列)
+    events = samples[["sample_id", "code", "first_date", "label_short", "label_combined"]].copy()
+    events = events.rename(columns={"first_date": "event_date"})
 
-    # 遍历样本计算特征
-    for idx, row in samples.iterrows():
-        if idx % 100 == 0:
-            logger.info(f"计算特征进度: {idx}/{len(samples)}")
+    features_df = fc.calculate(daily_data, events)
+    if features_df.empty:
+        logger.warning("特征表为空")
+        return features_df
 
-        code = row["code"]
-        first_date = row["first_date"]
-
-        # 获取该股票历史数据
-        stock_data = daily_data[daily_data["code"] == code].sort_values("date")
-
-        # 计算涨停前特征
-        features = pre_trend_calc.calculate_at_event(
-            code=code,
-            event_date=first_date,
-            daily_data=stock_data,
-        )
-
-        feature_dict = pre_trend_calc.to_dict(features)
-        feature_dict["sample_id"] = row["sample_id"]
-        feature_dict["code"] = code
-        feature_dict["first_date"] = first_date
-        feature_dict["label_combined"] = row["label_combined"]
-        feature_dict["label_short"] = row["label_short"]
-
-        features_list.append(feature_dict)
-
-    features_df = pd.DataFrame(features_list)
-    logger.info(f"计算完成，共 {len(features_df)} 个样本的特征")
-
+    # 还原列名: event_date -> first_date, 与下游一致
+    features_df = features_df.rename(columns={"event_date": "first_date"})
+    n_feat = sum(1 for c in features_df.columns if c.startswith("f_"))
+    logger.info(f"计算完成: {len(features_df)} 个样本 x {n_feat} 维特征")
     return features_df
 
 
@@ -344,30 +334,29 @@ def train_model(
     from pathlib import Path
     import json
 
-    model_dir = Path(config.get("model_dir", "models"))
-    model_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_path = model_dir / f"limit_up_lgbm_{ts}.pkl"
-    latest_path = model_dir / "limit_up_lgbm_latest.pkl"
-    meta_path = model_dir / f"limit_up_lgbm_{ts}.meta.json"
+    model_dir = config.get("model_dir", "models")
+    registry = ModelRegistry(model_dir)
 
-    trainer.save(str(model_path))
-    trainer.save(str(latest_path))   # 始终覆盖一份 latest, 方便回测/线上引用
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump({
-            "trained_at": ts,
-            "n_train": int(len(X_train)),
-            "n_valid": int(len(X_valid)),
-            "n_test":  int(len(X_test)),
-            "feature_cols": list(feature_cols),
-            "params": trainer.params,
-            "train_range":  [str(splits["train"]["first_date"].min()), str(splits["train"]["first_date"].max())],
-            "valid_range":  [str(splits["valid"]["first_date"].min()), str(splits["valid"]["first_date"].max())] if len(splits["valid"]) else None,
-            "test_range":   [str(splits["test"]["first_date"].min()),  str(splits["test"]["first_date"].max())]  if len(splits["test"])  else None,
-        }, f, ensure_ascii=False, indent=2)
-    logger.info(f"模型已保存: {model_path}")
-    logger.info(f"latest 指针: {latest_path}")
-    logger.info(f"训练元数据: {meta_path}")
+    # 构建 meta 信息
+    meta = {
+        "n_train": int(len(X_train)),
+        "n_valid": int(len(X_valid)),
+        "n_test": int(len(X_test)),
+        "feature_cols": list(feature_cols),
+        "params": trainer.params,
+        "train_range": [str(splits["train"]["first_date"].min()), str(splits["train"]["first_date"].max())],
+        "valid_range": [str(splits["valid"]["first_date"].min()), str(splits["valid"]["first_date"].max())] if len(splits["valid"]) else None,
+        "test_range": [str(splits["test"]["first_date"].min()), str(splits["test"]["first_date"].max())] if len(splits["test"]) else None,
+    }
+
+    # 保存到版本注册表
+    version = registry.save_version(
+        model=trainer,
+        meta=meta,
+        config=config,
+    )
+    logger.info(f"模型已保存为版本: {version}")
+    logger.info(f"latest 指针: {registry.get_latest_version()}")
 
     # 评估
     evaluator = ModelEvaluator()
@@ -394,7 +383,7 @@ def train_model(
     for _, row in importance_df.head(10).iterrows():
         logger.info(f"  {row['feature']}: {row['importance']:.4f}")
 
-    return trainer, evaluator, X_test, y_test
+    return trainer, evaluator, X_test, y_test, version
 
 
 def run_backtest(
@@ -402,7 +391,8 @@ def run_backtest(
     trainer,
     daily_data: pd.DataFrame,
     config: dict,
-) -> None:
+    version: str = None,
+) -> dict:
     """
     运行回测
 
@@ -411,6 +401,10 @@ def run_backtest(
         trainer: 训练好的模型
         daily_data: 日线数据
         config: 配置
+        version: 版本号（用于保存回测结果）
+
+    Returns:
+        回测指标字典
     """
     logger.info("=" * 50)
     logger.info("Step 7: 运行回测")
@@ -464,7 +458,7 @@ def run_backtest(
 
     if report.empty:
         logger.warning("回测无结果（可能是信号为空）")
-        return
+        return None
 
     # 输出回测指标
     metrics = backtester.get_metrics()
@@ -480,9 +474,57 @@ def run_backtest(
     logger.info(f"  最大回撤: {metrics.get('max_drawdown', 0):.2%}")
     logger.info(f"  交易次数: {metrics.get('num_trades', 0)}")
 
+    # 如果有版本号，保存回测结果
+    if version:
+        import json
+        from pathlib import Path
+        model_dir = config.get("model_dir", "models")
+        bt_file = Path(model_dir) / version / "backtest_results.json"
+        bt_data = {
+            "version": version,
+            "metrics": metrics,
+        }
+        with open(bt_file, "w", encoding="utf-8") as f:
+            json.dump(bt_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"回测结果已保存: {bt_file}")
+
+    return metrics
+
 
 def main():
     """主流程"""
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description="涨停二板主升浪因子挖掘")
+    parser.add_argument("--version", type=str, default=None,
+                        help="指定版本号加载模型进行回测，如 v001")
+    parser.add_argument("--list-versions", action="store_true",
+                        help="列出所有已保存的版本")
+    parser.add_argument("--model-dir", type=str, default="models",
+                        help="模型保存目录")
+    args = parser.parse_args()
+
+    # 列出版本
+    if args.list_versions:
+        registry = ModelRegistry(args.model_dir)
+        registry.list_versions()
+        return
+
+    # 加载指定版本
+    if args.version:
+        registry = ModelRegistry(args.model_dir)
+        version_info = registry.load_version(args.version)
+        if not version_info:
+            logger.error(f"版本 {args.version} 不存在")
+            return
+        logger.info(f"加载版本: {args.version}")
+        logger.info(f"训练时间: {version_info.get('trained_at')}")
+        logger.info(f"模型文件: {version_info.get('model_path')}")
+        # 加载模型和配置进行回测
+        trainer = LimitUpModelTrainer.load(version_info.get('model_path'))
+        # TODO: 使用保存的配置进行回测
+        logger.info("版本加载成功，可使用 --list-versions 查看所有版本")
+        return
+
     logger.info("=" * 60)
     logger.info("涨停二板主升浪因子挖掘 - 完整流程")
     logger.info("=" * 60)
@@ -507,6 +549,8 @@ def main():
         "train_end":    config.get("dataset.train_end"),
         "valid_end":    config.get("dataset.valid_end"),
         "test_end":     config.get("dataset.test_end"),
+        # 模型目录
+        "model_dir":    config.get("dataset.model_dir", "models"),
     }
 
     # Step 0: 加载数据
@@ -544,11 +588,21 @@ def main():
         # 全部加载（建议根据实际数据量调整）
         logger.info(f"准备加载 {len(main_codes)} 只股票数据...")
 
-        # 批量加载日线数据
+        # 批量加载日线数据（使用配置中的日期范围）
+        data_config = config.get_section("data")
+        start_date = data_config.get("start_date", "2018-01-01")
+        end_date = data_config.get("end_date", "2023-12-31")
+        logger.info(f"数据加载范围: {start_date} ~ {end_date}")
+
+        # 为特征计算预留足够的历史窗口（pre_trend_window_2m=40天 + 缓冲）
+        from dateutil.relativedelta import relativedelta
+        history_start = (pd.Timestamp(start_date) - relativedelta(months=3)).strftime("%Y-%m-%d")
+        logger.info(f"特征历史窗口起始: {history_start}（为 pre_trend 计算预留）")
+
         daily_data = tdx_loader.load_batch(
             codes=main_codes,
-            start_date="2023-01-01",
-            end_date="2023-12-31",
+            start_date=history_start,
+            end_date=end_date,
         )
 
         if daily_data.empty:
@@ -577,10 +631,10 @@ def main():
         return
 
     # Step 6: 训练模型
-    trainer, evaluator, X_test, y_test = train_model(features_df, full_config)
+    trainer, evaluator, X_test, y_test, version = train_model(features_df, full_config)
 
     # Step 7: 回测
-    run_backtest(features_df, trainer, daily_data, full_config)
+    run_backtest(features_df, trainer, daily_data, full_config, version=version)
 
     logger.info("=" * 60)
     logger.info("流程完成!")

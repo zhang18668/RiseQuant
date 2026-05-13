@@ -1,0 +1,45 @@
+{
+  "versions": [
+    {
+      "version": "v001",
+      "trained_at": "2026-05-13T15:45:31",
+      "model_file": "v001\\limit_up_lgbm.pkl",
+      "meta_file": "v001\\meta.json",
+      "backtest_file": null,
+      "config_file": "v001\\config_snapshot.json",
+      "n_train": 2235,
+      "n_valid": 2974,
+      "n_test": 2910,
+      "train_range": [
+        "2022-10-10 00:00:00",
+        "2022-12-30 00:00:00"
+      ],
+      "test_range": [
+        "2023-07-03 00:00:00",
+        "2023-12-29 00:00:00"
+      ],
+      "metrics": null
+    },
+    {
+      "version": "v002",
+      "trained_at": "2026-05-13T17:18:04",
+      "model_file": "v002\\limit_up_lgbm.pkl",
+      "meta_file": "v002\\meta.json",
+      "backtest_file": null,
+      "config_file": "v002\\config_snapshot.json",
+      "n_train": 5209,
+      "n_valid": 1291,
+      "n_test": 1619,
+      "train_range": [
+        "2022-10-10 00:00:00",
+        "2023-06-30 00:00:00"
+      ],
+      "test_range": [
+        "2023-10-09 00:00:00",
+        "2023-12-29 00:00:00"
+      ],
+      "metrics": null
+    }
+  ],
+  "latest_version": "v002"
+}

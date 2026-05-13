@@ -1,0 +1,58 @@
+{
+  "n_train": 5209,
+  "n_valid": 1291,
+  "n_test": 1619,
+  "feature_cols": [
+    "f_pt_ret_1",
+    "f_pt_ret_5",
+    "f_pt_ret_20",
+    "f_pt_ret_40",
+    "f_pt_max_ret_1m",
+    "f_pt_min_ret_1m",
+    "f_pt_ma_5",
+    "f_pt_ma_10",
+    "f_pt_ma_20",
+    "f_pt_ma_40",
+    "f_pt_ma_bullish",
+    "f_pt_close_to_ma20",
+    "f_pt_slope_1m",
+    "f_pt_slope_2m",
+    "f_pt_vp_corr_1m",
+    "f_pt_vol_change_1m",
+    "f_pt_vol_conv",
+    "f_pt_amp_1m",
+    "f_pt_vol_1m",
+    "f_pt_amp_2m",
+    "f_pt_vol_2m",
+    "f_pt_consol_days",
+    "f_pt_pos_in_range_2m",
+    "f_pt_dist_to_high_2m",
+    "f_pt_dist_to_low_2m",
+    "f_pt_score_trend",
+    "f_pt_score_volume",
+    "f_pt_score_shape",
+    "f_pt_score_comp"
+  ],
+  "params": {
+    "objective": "multiclass",
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "n_estimators": 100,
+    "verbose": -1,
+    "random_state": 42
+  },
+  "train_range": [
+    "2022-10-10 00:00:00",
+    "2023-06-30 00:00:00"
+  ],
+  "valid_range": [
+    "2023-07-03 00:00:00",
+    "2023-09-28 00:00:00"
+  ],
+  "test_range": [
+    "2023-10-09 00:00:00",
+    "2023-12-29 00:00:00"
+  ],
+  "version": "v002",
+  "trained_at": "2026-05-13T17:18:04"
+}
