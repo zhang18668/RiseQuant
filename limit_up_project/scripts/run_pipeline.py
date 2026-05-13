@@ -291,7 +291,7 @@ def train_model(
         test_ratio=config.get("test_ratio", 0.2),
         valid_ratio=config.get("valid_ratio", 0.1),
     )
-    splits = splitter.split_by_time(features_df)
+    splits = splitter.split_by_time(features_df, date_col="first_date")
 
     X_train = splits["train"][feature_cols].fillna(0)
     y_train = splits["train"]["label_combined"]

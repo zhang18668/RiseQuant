@@ -153,7 +153,10 @@ class Backtester:
         signals["date"] = pd.to_datetime(signals["date"])
         daily_data["date"] = pd.to_datetime(daily_data["date"])
 
-        daily_idx = daily_data.set_index(["date", "code"])
+        # 去重 + 排序: 防止 (date, code) 重复导致 .loc 返回 Series,
+        # 同时消除 "indexing past lexsort depth" 的 PerformanceWarning
+        daily_data = daily_data.drop_duplicates(subset=["date", "code"], keep="last")
+        daily_idx = daily_data.set_index(["date", "code"]).sort_index()
         all_dates = sorted(daily_data["date"].unique())
 
         equity_records: List[Dict[str, object]] = []

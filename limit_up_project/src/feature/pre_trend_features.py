@@ -267,10 +267,16 @@ class PreTrendFeatures:
             return feats
         return pd.Series(feats)
 
-    def to_dict(self, feats) -> Dict[str, float]:
+    def to_dict(self, feats, drop_meta: bool = True) -> Dict[str, float]:
+        """转成 ``dict``. ``drop_meta=True`` 时剔除 ``code`` / ``event_date`` 等元数据."""
         if isinstance(feats, dict):
-            return feats
-        return feats.to_dict()
+            d = dict(feats)
+        else:
+            d = feats.to_dict()
+        if drop_meta:
+            for k in ("code", "event_date"):
+                d.pop(k, None)
+        return d
 
     # ------------------------------------------------------------------
     def _empty_features(self, code: str, event_date) -> pd.Series:

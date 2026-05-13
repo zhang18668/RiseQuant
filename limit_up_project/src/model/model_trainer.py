@@ -75,6 +75,11 @@ class LimitUpModelTrainer:
         if len(X_train) == 0:
             raise ValueError("empty training data")
 
+        # 防御: 自动剔除非数值列 (如 datetime / object)
+        X_train = self._coerce_numeric(X_train, drop_warning=True)
+        if X_valid is not None:
+            X_valid = self._coerce_numeric(X_valid, drop_warning=False)
+
         y_series = pd.Series(y_train)
         n_classes = int(y_series.nunique())
 
@@ -105,12 +110,28 @@ class LimitUpModelTrainer:
         return self.model
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce_numeric(X: pd.DataFrame, drop_warning: bool = False) -> pd.DataFrame:
+        """剔除非数值列 (datetime / object / category), 仅保留 LightGBM 能直接吃的列."""
+        numeric_cols = X.select_dtypes(include=["number", "bool"]).columns
+        dropped = [c for c in X.columns if c not in numeric_cols]
+        if dropped and drop_warning:
+            logger.warning(f"dropping non-numeric feature columns: {dropped}")
+        return X[numeric_cols].copy()
+
+    # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         self._check_fitted()
+        X = self._coerce_numeric(X)
+        if self.feature_names_:
+            X = X.reindex(columns=self.feature_names_, fill_value=0.0)
         return self.model.predict(X)
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         self._check_fitted()
+        X = self._coerce_numeric(X)
+        if self.feature_names_:
+            X = X.reindex(columns=self.feature_names_, fill_value=0.0)
         return self.model.predict_proba(X)
 
     # ------------------------------------------------------------------
