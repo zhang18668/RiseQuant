@@ -392,7 +392,7 @@ def run_backtest(
     daily_data: pd.DataFrame,
     config: dict,
     version: str = None,
-) -> dict:
+) -> tuple:
     """
     运行回测
 
@@ -404,7 +404,7 @@ def run_backtest(
         version: 版本号（用于保存回测结果）
 
     Returns:
-        回测指标字典
+        tuple: (backtester, metrics)
     """
     logger.info("=" * 50)
     logger.info("Step 7: 运行回测")
@@ -458,7 +458,7 @@ def run_backtest(
 
     if report.empty:
         logger.warning("回测无结果（可能是信号为空）")
-        return None
+        return None, None
 
     # 输出回测指标
     metrics = backtester.get_metrics()
@@ -476,19 +476,27 @@ def run_backtest(
 
     # 如果有版本号，保存回测结果
     if version:
-        import json
-        from pathlib import Path
-        model_dir = config.get("model_dir", "models")
-        bt_file = Path(model_dir) / version / "backtest_results.json"
-        bt_data = {
-            "version": version,
-            "metrics": metrics,
-        }
-        with open(bt_file, "w", encoding="utf-8") as f:
-            json.dump(bt_data, f, ensure_ascii=False, indent=2)
-        logger.info(f"回测结果已保存: {bt_file}")
+        # 构建信号 DataFrame（用于保存）
+        feature_cols = [c for c in features_df.columns
+                       if c not in ["sample_id", "code", "first_date", "label_combined", "label_short"]]
+        X = features_df[feature_cols].fillna(0)
+        proba = trainer.predict_proba(X)
+        signals_df = features_df[["first_date", "code"]].copy()
+        signals_df["score"] = proba[:, -1]
+        signals_df = signals_df.rename(columns={"first_date": "date"})
 
-    return metrics
+        # 使用 ModelRegistry 的 update_version_with_backtest 保存完整产物
+        registry = ModelRegistry(config.get("model_dir", "models"))
+        archive_dir = registry.update_version_with_backtest(
+            version=version,
+            backtester=backtester,
+            metrics=metrics,
+            signals_df=signals_df,
+        )
+        if archive_dir:
+            logger.info(f"回测产物已保存到: {archive_dir}")
+
+    return backtester, metrics
 
 
 def main():
