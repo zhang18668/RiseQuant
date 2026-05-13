@@ -45,6 +45,9 @@ from src.backtest.backtester import Backtester
 # 数据加载
 from src.data.tdx_loader import TDXDataLoader, load_tdx_data
 
+# 防未来函数校验器
+from src.utils.validator import LookAheadValidator
+
 # 设置日志
 setup_logger(log_level="INFO")
 logger = get_logger(__name__)
@@ -286,12 +289,36 @@ def train_model(
     X = features_df[feature_cols].fillna(0)
     y = features_df["label_combined"]
 
-    # 划分数据集
+    # 划分数据集 (按时间序, 杜绝未来函数)
     splitter = SectorStockSplitter(
         test_ratio=config.get("test_ratio", 0.2),
         valid_ratio=config.get("valid_ratio", 0.1),
     )
-    splits = splitter.split_by_time(features_df, date_col="first_date")
+    split_method = (config.get("split_method") or "ratio").lower()
+    if split_method == "date":
+        train_end = config.get("train_end")
+        valid_end = config.get("valid_end")
+        test_end  = config.get("test_end")
+        logger.info(
+            f"split_method=date: train_end={train_end}, valid_end={valid_end}, test_end={test_end}"
+        )
+        splits = splitter.split_by_date_ranges(
+            features_df,
+            date_col="first_date",
+            train_end=train_end,
+            valid_end=valid_end,
+            test_end=test_end,
+        )
+    else:
+        logger.info(
+            f"split_method=ratio: test_ratio={config.get('test_ratio', 0.2)}, "
+            f"valid_ratio={config.get('valid_ratio', 0.1)}"
+        )
+        splits = splitter.split_by_time(features_df, date_col="first_date")
+
+    # 防未来函数: 校验 train.max < valid.min < test.min, 校验特征列命名
+    LookAheadValidator.assert_no_time_leakage(splits, date_col="first_date")
+    LookAheadValidator.scan_feature_names(feature_cols, raise_error=True)
 
     X_train = splits["train"][feature_cols].fillna(0)
     y_train = splits["train"]["label_combined"]
@@ -301,11 +328,46 @@ def train_model(
     y_test = splits["test"]["label_combined"]
 
     logger.info(f"训练集: {len(X_train)}, 验证集: {len(X_valid)}, 测试集: {len(X_test)}")
+    logger.info(
+        f"时间区间: train [{splits['train']['first_date'].min()} ~ {splits['train']['first_date'].max()}], "
+        f"valid [{splits['valid']['first_date'].min()} ~ {splits['valid']['first_date'].max()}], "
+        f"test  [{splits['test']['first_date'].min()} ~ {splits['test']['first_date'].max()}]"
+    )
 
     # 训练模型
     model_config = config.get("model", {})
     trainer = LimitUpModelTrainer(model_config)
     trainer.train(X_train, y_train, X_valid, y_valid, feature_names=feature_cols)
+
+    # 保存模型 + 训练元信息
+    from datetime import datetime
+    from pathlib import Path
+    import json
+
+    model_dir = Path(config.get("model_dir", "models"))
+    model_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model_path = model_dir / f"limit_up_lgbm_{ts}.pkl"
+    latest_path = model_dir / "limit_up_lgbm_latest.pkl"
+    meta_path = model_dir / f"limit_up_lgbm_{ts}.meta.json"
+
+    trainer.save(str(model_path))
+    trainer.save(str(latest_path))   # 始终覆盖一份 latest, 方便回测/线上引用
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "trained_at": ts,
+            "n_train": int(len(X_train)),
+            "n_valid": int(len(X_valid)),
+            "n_test":  int(len(X_test)),
+            "feature_cols": list(feature_cols),
+            "params": trainer.params,
+            "train_range":  [str(splits["train"]["first_date"].min()), str(splits["train"]["first_date"].max())],
+            "valid_range":  [str(splits["valid"]["first_date"].min()), str(splits["valid"]["first_date"].max())] if len(splits["valid"]) else None,
+            "test_range":   [str(splits["test"]["first_date"].min()),  str(splits["test"]["first_date"].max())]  if len(splits["test"])  else None,
+        }, f, ensure_ascii=False, indent=2)
+    logger.info(f"模型已保存: {model_path}")
+    logger.info(f"latest 指针: {latest_path}")
+    logger.info(f"训练元数据: {meta_path}")
 
     # 评估
     evaluator = ModelEvaluator()
@@ -367,12 +429,35 @@ def run_backtest(
     signals["score"] = proba[:, 2]  # label=2 的概率
     signals = signals.rename(columns={"first_date": "date"})
 
-    # 运行回测
+    # 按回测年份过滤信号与日线数据
+    bt_start = config.get("start_date")
+    bt_end   = config.get("end_date")
+    if bt_start or bt_end:
+        signals["date"] = pd.to_datetime(signals["date"])
+        daily_data = daily_data.copy()
+        daily_data["date"] = pd.to_datetime(daily_data["date"])
+        if bt_start:
+            signals    = signals[signals["date"]    >= pd.Timestamp(bt_start)]
+            daily_data = daily_data[daily_data["date"] >= pd.Timestamp(bt_start)]
+        if bt_end:
+            signals    = signals[signals["date"]    <= pd.Timestamp(bt_end)]
+            daily_data = daily_data[daily_data["date"] <= pd.Timestamp(bt_end)]
+        logger.info(
+            f"回测窗口: {bt_start or 'beginning'} ~ {bt_end or 'end'} | "
+            f"信号 {len(signals)} 条, 日线 {len(daily_data)} 条"
+        )
+
+    # 运行回测 — entry_delay=1 表示 T 日产生信号、T+1 开盘成交, 杜绝未来函数
     backtester = Backtester(
         initial_cash=config.get("initial_cash", 10000000),
         topk=config.get("topk", 10),
         sell_n=config.get("sell_n", 5),
         slippage=config.get("slippage", 0.003),
+        entry_delay=config.get("entry_delay", 1),
+    )
+    logger.info(
+        f"Backtester entry_delay={backtester.entry_delay} "
+        f"(信号日 T 在 T+{backtester.entry_delay} 开盘成交, 杜绝未来函数)"
     )
 
     report = backtester.run(signals, daily_data)
@@ -415,8 +500,13 @@ def main():
         **feature_config,
         "model": model_config,
         **backtest_config,
-        "test_ratio": config.get("dataset.test_ratio", 0.2),
-        "valid_ratio": config.get("dataset.valid_ratio", 0.1),
+        # dataset 切分
+        "split_method": config.get("dataset.split_method", "ratio"),
+        "test_ratio":   config.get("dataset.test_ratio", 0.2),
+        "valid_ratio":  config.get("dataset.valid_ratio", 0.1),
+        "train_end":    config.get("dataset.train_end"),
+        "valid_end":    config.get("dataset.valid_end"),
+        "test_end":     config.get("dataset.test_end"),
     }
 
     # Step 0: 加载数据

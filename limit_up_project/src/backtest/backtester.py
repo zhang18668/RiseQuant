@@ -1,11 +1,19 @@
 """B-001 简易回测引擎
 
 实现一个最小但闭合的事件驱动回测器:
-- 每个交易日, 按当日 ``signals`` 选 top-K 候选;
+- 每个交易日 T, 取 ``T - entry_delay`` 日 (默认 T-1) 产生的 ``signals`` 选 top-K 候选;
 - 持仓上限 ``topk`` 只, 等权买入;
 - 持仓达 ``sell_n`` 个交易日后强制卖出 (按收盘价);
 - 滑点 ``slippage`` 影响买入价;
 - 佣金 ``commission`` 影响交易成本.
+
+杜绝未来函数说明
+------------------
+- 信号日 (signal_date) 必须使用 *仅含 signal_date 及之前* 的数据生成;
+- 实际撮合发生在 signal_date 之后的第 ``entry_delay`` 个交易日 (默认 1, 即 T+1 开盘);
+- ``entry_delay`` 设为 0 等同于"信号日当日开盘成交", 仅在你 *确认信号特征 *
+  完全不依赖信号日数据* (例如使用 ``signal_date - 1`` 的特征) 时才可用,
+  否则会引入 look-ahead bias.
 
 公开类
 ------
@@ -16,6 +24,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -101,12 +110,24 @@ class Backtester:
         sell_n: int = 5,
         slippage: float = 0.003,
         commission: float = 0.0,
+        entry_delay: int = 1,
     ) -> None:
         self.initial_cash = float(initial_cash)
         self.topk = int(topk)
         self.sell_n = int(sell_n)
         self.slippage = float(slippage)
         self.commission = float(commission)
+        # 信号 -> 撮合的交易日延迟 (>=1 杜绝未来函数, 信号日 T 在 T+entry_delay 开盘成交)
+        if int(entry_delay) < 0:
+            raise ValueError("entry_delay must be >= 0")
+        if int(entry_delay) == 0:
+            msg = (
+                "Backtester: entry_delay=0 — 信号日当日开盘成交。除非信号特征完全"
+                "不使用信号日的数据，否则会引入未来函数。建议使用 entry_delay>=1。"
+            )
+            logger.warning(msg)
+            warnings.warn(msg, stacklevel=2)
+        self.entry_delay = int(entry_delay)
 
         # 运行时状态
         self.cash: float = self.initial_cash
@@ -163,7 +184,7 @@ class Backtester:
 
         for current_date in all_dates:
             self._process_sells(current_date, daily_idx, all_dates)
-            self._process_buys(current_date, signals, daily_idx)
+            self._process_buys(current_date, signals, daily_idx, all_dates)
             market_value = self._mark_to_market(current_date, daily_idx)
             total_value = self.cash + market_value
             equity_records.append({
@@ -222,8 +243,30 @@ class Backtester:
         self.positions = keep
 
     # ------------------------------------------------------------------
-    def _process_buys(self, current_date, signals: pd.DataFrame, daily_idx) -> None:
-        day_signals = signals[signals["date"] == current_date].sort_values(
+    def _process_buys(
+        self,
+        current_date,
+        signals: pd.DataFrame,
+        daily_idx,
+        all_dates,
+    ) -> None:
+        # ------------------------------------------------------------------
+        # 杜绝未来函数: 信号日 (signal_date) 必须严格早于撮合日 (current_date),
+        # 由 entry_delay 控制. 默认 entry_delay=1, 即 T 日信号在 T+1 开盘成交.
+        # ------------------------------------------------------------------
+        if self.entry_delay <= 0:
+            signal_date = current_date
+        else:
+            try:
+                cur_pos = all_dates.index(current_date)
+            except ValueError:
+                return
+            sig_pos = cur_pos - self.entry_delay
+            if sig_pos < 0:
+                return  # 暖机期: 没有足够历史日产生信号
+            signal_date = all_dates[sig_pos]
+
+        day_signals = signals[signals["date"] == signal_date].sort_values(
             "score", ascending=False
         )
         if day_signals.empty:

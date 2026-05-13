@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -105,22 +106,62 @@ class CustomDataset:
         test_ratio: float = 0.2,
         valid_ratio: float = 0.0,
         random_seed: int = 42,
+        shuffle: bool = True,
+        date_col: Optional[str] = None,
     ) -> DatasetSegments:
+        """按样本下标切分.
+
+        ``shuffle=True`` (默认) 会随机洗牌, 在时间序列任务中会引入未来函数,
+        仅在 ``date_col is None`` 且确认 IID 时可用. 建议:
+        - 时间序列任务: ``shuffle=False``, 或直接使用 :meth:`split_by_time`;
+        - 必须随机时: 传入 ``date_col`` 以触发训练/测试时间断言.
+        """
         n = len(self.df)
         if n == 0:
             return DatasetSegments(train=self.df, valid=None, test=None)
-        rng = np.random.default_rng(random_seed)
-        idx = rng.permutation(n)
+
+        if shuffle:
+            warnings.warn(
+                "split_by_index(shuffle=True) 会打乱时间序, 在时间序列/量化任务"
+                "中会引入未来函数. 请使用 split_by_time 或传入 shuffle=False.",
+                stacklevel=2,
+            )
+            rng = np.random.default_rng(random_seed)
+            idx = rng.permutation(n)
+        else:
+            idx = np.arange(n)
         n_test = int(n * test_ratio)
         n_valid = int(n * valid_ratio)
-        test_idx = idx[:n_test]
-        valid_idx = idx[n_test : n_test + n_valid]
-        train_idx = idx[n_test + n_valid :]
-        return DatasetSegments(
+        # 按时间序: 训练集在前, 验证集中, 测试集在后 (shuffle=False 时)
+        if shuffle:
+            test_idx = idx[:n_test]
+            valid_idx = idx[n_test : n_test + n_valid]
+            train_idx = idx[n_test + n_valid :]
+        else:
+            n_train = n - n_test - n_valid
+            train_idx = idx[:n_train]
+            valid_idx = idx[n_train : n_train + n_valid]
+            test_idx = idx[n_train + n_valid :]
+
+        segments = DatasetSegments(
             train=self.df.iloc[train_idx].reset_index(drop=True),
             valid=self.df.iloc[valid_idx].reset_index(drop=True) if n_valid else None,
             test=self.df.iloc[test_idx].reset_index(drop=True) if n_test else None,
         )
+
+        # 时间断言: 任一段非空时, train.max < valid.min < test.min
+        if date_col is not None and date_col in self.df.columns:
+            train_max = pd.to_datetime(segments.train[date_col]).max() if not segments.train.empty else None
+            for name, seg in (("valid", segments.valid), ("test", segments.test)):
+                if seg is None or seg.empty:
+                    continue
+                seg_min = pd.to_datetime(seg[date_col]).min()
+                if train_max is not None and pd.notna(seg_min) and pd.notna(train_max) and seg_min <= train_max:
+                    raise ValueError(
+                        f"detected look-ahead leakage: train.{date_col}.max()={train_max}"
+                        f" >= {name}.{date_col}.min()={seg_min}. 请使用 split_by_time."
+                    )
+        return segments
 
     # ------------------------------------------------------------------
     def get_xy(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series]:

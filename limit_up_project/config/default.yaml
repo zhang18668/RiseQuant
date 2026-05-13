@@ -31,14 +31,32 @@ model:
     verbose: -1
 
 dataset:
+  # 切分策略:
+  #   "ratio" — 按 test_ratio/valid_ratio 比例 (严格时间序 + 日期边界对齐)
+  #   "date"  — 按下面的 train_end/valid_end/test_end 显式日期切分 (推荐)
+  split_method: "date"
   test_ratio: 0.2
   valid_ratio: 0.1
+  # split_method=date 时生效: 日期均为闭区间右边界
+  #   train: date <= train_end
+  #   valid: train_end < date <= valid_end
+  #   test : valid_end < date <= test_end (留空表示不限)
+  train_end: "2022-12-31"
+  valid_end: "2023-06-30"
+  test_end:  "2023-12-31"
+  # 若使用 purged k-fold, 训练-测试间留出的禁运天数
+  purged_kfold_embargo_days: 10
 
 backtest:
-  start_date: "2022-01-01"
-  end_date: "2023-12-31"
+  # 回测时间窗口: 只把 daily_data 中该区间内的样本拿去回测
+  # 留空时回测全部数据
+  start_date: "2025-01-06"
+  end_date: "2025-12-31"
   initial_cash: 10000000
   benchmark: "SH000300"
   topk: 10
   sell_n: 5
   slippage: 0.003
+  # 杜绝未来函数: T 日产生信号, T+entry_delay 个交易日的开盘成交.
+  # >=1 表示信号收盘后产生、次日开盘成交; 设为 0 会触发警告.
+  entry_delay: 1
