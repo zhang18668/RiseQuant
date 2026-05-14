@@ -37,8 +37,9 @@ SAMPLE_COLS = [
     "first_date", "potential_date",
     "second_date",                   # 可能为 NaT (负样本)
     "gap_so_far",                    # potential - first
-    "days_to_second",                # second - potential, 负样本 = inf
+    "days_to_second",                # second - potential, 负样本 = -1
     "label_pre",                     # 0/1, 是否在第二涨停前 K 日内
+    "sample_weight",                 # B3: 训练样本权重 (正样本按 1/days_to_second)
     "stop_loss_price",
     "first_open", "first_close",
 ]
@@ -48,9 +49,9 @@ SAMPLE_COLS = [
 class WashSampleBuilder:
     """滚动潜伏样本构造器."""
 
-    positive_window: int = 3      # 距 second_date <= K 日为正样本
+    positive_window: int = 5      # 距 second_date <= K 日为正样本 (放宽到 5, 给模型更多潜伏机会)
     min_gap_for_neg: int = 3      # 负样本起始 (与 detector 的 min_gap 一致)
-    max_gap_for_neg: int = 20     # 负样本结束
+    max_gap_for_neg: int = 30     # 负样本结束 (与 detector 的 max_gap 一致)
     threshold: float = 9.9
     cooldown_days: int = 3        # 与 detector 的 cooldown_days 一致
 
@@ -114,6 +115,14 @@ class WashSampleBuilder:
                     t = dates[t_idx]
                     days_to_second = second_idx - t_idx
                     label = 1 if days_to_second <= self.positive_window else 0
+                    # B3: 样本权重 — 正样本按 1/days_to_second 加权 (距 second 越近权重越大)
+                    # 距 1 天: weight=1.0; 2 天: 0.5; 3 天: 0.33; 4 天: 0.25; 5 天: 0.2
+                    if label == 1:
+                        weight = 1.0 / max(days_to_second, 1)
+                    else:
+                        # 震荡区间内的"中性"负样本 (距 second 较远但不属于失败首板)
+                        # 给较小权重, 避免淹没失败首板的真负样本
+                        weight = 0.5
                     rows.append({
                         "sample_id":      f"{code}_{first_d.strftime('%Y%m%d')}_{t.strftime('%Y%m%d')}",
                         "code":           code,
@@ -123,6 +132,7 @@ class WashSampleBuilder:
                         "gap_so_far":     t_idx - first_idx,
                         "days_to_second": days_to_second,
                         "label_pre":      label,
+                        "sample_weight":  weight,
                         "stop_loss_price": float(ev["stop_loss_price"]),
                         "first_open":     float(ev["first_open"]),
                         "first_close":    float(ev["first_close"]),
@@ -159,6 +169,7 @@ class WashSampleBuilder:
                         "gap_so_far":     t_idx - first_idx,
                         "days_to_second": -1,
                         "label_pre":      0,
+                        "sample_weight":  1.0,   # B3: 失败首板的负样本是真负样本, 权重 1.0
                         "stop_loss_price": first_open,
                         "first_open":     first_open,
                         "first_close":    float("nan"),
@@ -192,5 +203,20 @@ class WashSampleBuilder:
                     continue
                 if (str(code), pd.Timestamp(g["date"].iloc[i])) in success_first:
                     continue  # 已成功的不算 failed
+                out.append((str(code), pd.Timestamp(g["date"].iloc[i]), float(g["open"].iloc[i])))
+        return out
+ (df["change_pct"] >= self.threshold)
+        for code, g in df.groupby("code", sort=False):
+            g = g.reset_index(drop=True)
+            lu_arr = (g["change_pct"] >= self.threshold).to_numpy()
+            n = len(g)
+            for i in range(n):
+                if not lu_arr[i]:
+                    continue
+                lo = max(0, i - self.cooldown_days)
+                if lu_arr[lo:i].any():
+                    continue
+                if (str(code), pd.Timestamp(g["date"].iloc[i])) in success_first:
+                    continue
                 out.append((str(code), pd.Timestamp(g["date"].iloc[i]), float(g["open"].iloc[i])))
         return out

@@ -44,7 +44,7 @@ class WashSecondDetector:
     threshold: float = 9.9         # 涨停阈值 (%)
     cooldown_days: int = 3         # 首板前 N 日不能有涨停
     min_gap: int = 3               # 首板到第二涨停最小交易日间隔 (排除连板)
-    max_gap: int = 20              # 首板到第二涨停最大交易日间隔
+    max_gap: int = 30              # 首板到第二涨停最大交易日间隔 (放宽到 30, 容纳更长的洗盘)
     exclude_st: bool = True
 
     # ------------------------------------------------------------------

@@ -71,3 +71,4 @@ backtest:
   take_profit: 0.0        # 硬止盈 (0 表示关闭, 例 0.10 表示 +10% 兑现)
   trailing_stop: 0.0      # 移动止盈 (0 表示关闭, 例 0.05 表示从最高回撤 5% 出)
   skip_zhangting_open: true   # T+1 一字涨停 (>=9.5% 高开) 不买
+  cooldown_after_stop: 5  # 止损 (含动态止损) 后该 code 在 N 个交易日内禁买

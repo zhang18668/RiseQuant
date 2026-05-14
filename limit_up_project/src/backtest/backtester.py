@@ -119,6 +119,7 @@ class Backtester:
         trailing_stop: float = 0.0,    # 移动止盈, 例如 0.05 表示从最高点回撤 5% 出场
         min_score: float = 0.0,        # 概率阈值: 信号 score < min_score 不买
         skip_zhangting_open: bool = True,  # T+1 一字涨停 (open>=9.5%) 买不进
+        cooldown_after_stop: int = 5,  # 止损后该 code 在 N 个交易日内禁买 (0 关闭)
     ) -> None:
         self.initial_cash = float(initial_cash)
         self.topk = int(topk)
@@ -130,6 +131,7 @@ class Backtester:
         self.trailing_stop = float(trailing_stop)
         self.min_score = float(min_score)
         self.skip_zhangting_open = bool(skip_zhangting_open)
+        self.cooldown_after_stop = int(cooldown_after_stop)
         # 信号 -> 撮合的交易日延迟 (>=1 杜绝未来函数, 信号日 T 在 T+entry_delay 开盘成交)
         if int(entry_delay) < 0:
             raise ValueError("entry_delay must be >= 0")
@@ -158,6 +160,8 @@ class Backtester:
         self.equity_curve = pd.DataFrame(
             columns=["date", "cash", "market_value", "total_value"]
         )
+        # 冷静期: code -> 解禁日 (Timestamp), 该日及之前禁买
+        self.cooldown_until: Dict[str, pd.Timestamp] = {}
 
     @staticmethod
     def _fmt_date(d) -> str:
@@ -285,6 +289,19 @@ class Backtester:
                         return_pct=return_pct,
                     )
                 )
+                # 止损类触发冷静期, 设定 cooldown 截止日 (含当日)
+                if self.cooldown_after_stop > 0 and sell_reason in (
+                    "STOP_DYNAMIC", "STOP_LOSS", "TRAILING_STOP"
+                ):
+                    try:
+                        cur_pos = all_dates.index(current_date)
+                        end_pos = min(len(all_dates) - 1, cur_pos + self.cooldown_after_stop)
+                        self.cooldown_until[pos.code] = all_dates[end_pos]
+                    except ValueError:
+                        # 找不到 current_date, 退化为日历日加 N 天
+                        self.cooldown_until[pos.code] = (
+                            pd.Timestamp(current_date) + pd.Timedelta(days=self.cooldown_after_stop)
+                        )
             else:
                 keep.append(pos)
         self.positions = keep
@@ -332,6 +349,10 @@ class Backtester:
                 break
             code = str(sig["code"])
             if code in held_codes:
+                continue
+            # 冷静期: 该 code 在 cooldown 截止日及之前禁买
+            cd = self.cooldown_until.get(code)
+            if cd is not None and pd.Timestamp(current_date) <= cd:
                 continue
             if (current_date, code) not in daily_idx.index:
                 continue

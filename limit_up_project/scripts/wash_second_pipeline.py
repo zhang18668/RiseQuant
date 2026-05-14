@@ -32,6 +32,7 @@ from src.data.tdx_loader import TDXDataLoader
 from src.event.wash_second_detector import WashSecondDetector
 from src.event.wash_sample_builder import WashSampleBuilder
 from src.feature.wash_features import WashFeatures
+from src.feature.market_features import MarketFeatures, market_proxy_from_daily
 from src.dataset.sector_split import SectorStockSplitter
 from src.model.model_trainer import LimitUpModelTrainer
 from src.model.model_evaluator import ModelEvaluator
@@ -71,7 +72,7 @@ def detect_events_and_samples(daily: pd.DataFrame, cfg: dict):
 
 
 def compute_features(samples: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    logger.info("Step 3: 计算震荡洗盘特征 (WashFeatures)")
+    logger.info("Step 3: 计算震荡洗盘特征 (WashFeatures) + 大盘特征 (MarketFeatures)")
     wf = WashFeatures()
     daily_by_code = {c: g.sort_values("date").reset_index(drop=True)
                      for c, g in daily.groupby("code")}
@@ -83,21 +84,41 @@ def compute_features(samples: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame
         feats = wf.calculate(sub, r["first_date"], r["potential_date"]).to_dict()
         feats["sample_id"]      = r["sample_id"]
         feats["label_pre"]      = int(r["label_pre"])
+        feats["sample_weight"]  = float(r["sample_weight"])
         feats["stop_loss_price"]= float(r["stop_loss_price"])
         feats["first_open"]     = float(r["first_open"])
         feats["days_to_second"] = int(r["days_to_second"]) if r["days_to_second"] != -1 else -1
         rows.append(feats)
         if (i + 1) % 2000 == 0:
-            logger.info(f"  feature progress: {i+1}/{len(samples)}")
+            logger.info(f"  wash feature progress: {i+1}/{len(samples)}")
     df = pd.DataFrame(rows)
-    n_feat = sum(1 for c in df.columns if c.startswith("f_w_"))
-    logger.info(f"  特征表: {len(df)} 行 x {n_feat} 维特征")
+    if df.empty:
+        return df
+
+    # B2: 大盘特征 — 用全市场代理 (close=median, volume=sum), 按 potential_date 横切
+    logger.info("  合成大盘代理 + 计算大盘特征 (按日期去重批量算)")
+    market_data = market_proxy_from_daily(daily)
+    mf = MarketFeatures()
+    df["potential_date"] = pd.to_datetime(df["potential_date"])
+    unique_dates = df["potential_date"].drop_duplicates().sort_values()
+    mkt_rows = [mf.calculate_at_event(d, market_data) for d in unique_dates]
+    mkt_df = pd.DataFrame(mkt_rows)
+    if not mkt_df.empty:
+        mkt_df["event_date"] = pd.to_datetime(mkt_df["event_date"])
+        mkt_df = mkt_df.rename(columns={"event_date": "potential_date"})
+        df = df.merge(mkt_df, on="potential_date", how="left")
+
+    n_wash = sum(1 for c in df.columns if c.startswith("f_w_"))
+    n_mkt  = sum(1 for c in df.columns if c.startswith("f_mkt_"))
+    logger.info(f"  特征表: {len(df)} 行 x {n_wash} wash + {n_mkt} market = {n_wash+n_mkt} 维")
     return df
 
 
 def train(features_df: pd.DataFrame, full_cfg: dict, arch: RunArchive):
     logger.info("Step 4: 切分 + 训练")
-    feature_cols = [c for c in features_df.columns if c.startswith("f_w_")]
+    # B1+B2: wash 特征 + 大盘特征 都纳入
+    feature_cols = [c for c in features_df.columns
+                    if c.startswith("f_w_") or c.startswith("f_mkt_")]
     LookAheadValidator.scan_feature_names(feature_cols, raise_error=True)
 
     sp_method = full_cfg.get("split_method", "date")
@@ -124,9 +145,19 @@ def train(features_df: pd.DataFrame, full_cfg: dict, arch: RunArchive):
     y_valid = splits["valid"]["label_pre"]
     X_test  = splits["test"][feature_cols].fillna(0)
     y_test  = splits["test"]["label_pre"]
+    # B3: 样本权重
+    w_train = splits["train"]["sample_weight"] if "sample_weight" in splits["train"].columns else None
+    w_valid = splits["valid"]["sample_weight"] if "sample_weight" in splits["valid"].columns else None
+    if w_train is not None:
+        logger.info(f"  样本权重: train mean={w_train.mean():.3f}, std={w_train.std():.3f}")
 
     trainer = LimitUpModelTrainer({"params": full_cfg.get("model_params", {})})
-    trainer.train(X_train, y_train, X_valid, y_valid, feature_names=feature_cols)
+    trainer.train(
+        X_train, y_train, X_valid, y_valid,
+        feature_names=feature_cols,
+        sample_weight=w_train,
+        eval_sample_weight=w_valid,
+    )
 
     # 评估
     ev = ModelEvaluator()
@@ -203,6 +234,7 @@ def backtest(features_df: pd.DataFrame, trainer, daily: pd.DataFrame, full_cfg: 
         take_profit=full_cfg.get("take_profit", 0.0),
         trailing_stop=full_cfg.get("trailing_stop", 0.0),
         skip_zhangting_open=True,
+        cooldown_after_stop=full_cfg.get("cooldown_after_stop", 5),
     )
     bt.run(signals, daily)
     m = bt.get_metrics()
@@ -233,8 +265,8 @@ def main():
         "limit_up_threshold": event_cfg.get("limit_up_threshold", 9.9),
         "cooldown_days":      3,
         "min_gap":            3,
-        "max_gap":            20,
-        "positive_window":    3,
+        "max_gap":            30,
+        "positive_window":    5,
         "exclude_st":         event_cfg.get("exclude_st", True),
         "split_method":       cfg.get("dataset.split_method", "date"),
         "test_ratio":         cfg.get("dataset.test_ratio", 0.2),
@@ -250,6 +282,7 @@ def main():
         "slippage":           bt_cfg.get("slippage", 0.003),
         "min_score":          bt_cfg.get("min_score", 0.6),
         "trailing_stop":      bt_cfg.get("trailing_stop", 0.0),
+        "cooldown_after_stop": bt_cfg.get("cooldown_after_stop", 5),
         "bt_start":           bt_cfg.get("start_date"),
         "bt_end":             bt_cfg.get("end_date"),
     }

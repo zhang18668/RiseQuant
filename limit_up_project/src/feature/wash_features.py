@@ -95,7 +95,8 @@ class WashFeatures:
             "code": str(df["code"].iloc[pot_idx]) if "code" in df.columns else "",
             "first_date": first_date,
             "potential_date": potential_date,
-            "gap_days_so_far": int(pot_idx - first_idx),
+            # B1 改进: 把"已潜伏天数"作为特征 (f_w_ 前缀, 自动进入模型)
+            "f_w_gap_so_far": float(pot_idx - first_idx),
         }
 
         # --- 1) 价格相对首板的位置 ----------------------------------
@@ -202,29 +203,72 @@ class WashFeatures:
             out["f_w_amp_recent5"] = float("nan")
             out["f_w_amp_convergence"] = float("nan")
 
-        # --- 7) 当日动作 -------------------------------------------
+        # --- 7) 当日动作 + 近 5 日聚合 (B4 改进) -----------------
         # 今日相对昨日的涨跌幅
         if pot_idx >= 1:
             prev_close = float(df["close"].iloc[pot_idx - 1])
             out["f_w_today_ret"] = _safe_div(base_close - prev_close, prev_close)
         else:
             out["f_w_today_ret"] = float("nan")
-        # 今日振幅
         today_high = float(df["high"].iloc[pot_idx])
         today_low  = float(df["low"].iloc[pot_idx])
         out["f_w_today_amp"] = _safe_div(today_high - today_low, today_low)
-        # 今日量比 (相对震荡区间均量)
         if not wash_volume.empty:
             avg = float(wash_volume.mean())
             out["f_w_today_vol_ratio"] = _safe_div(float(df["volume"].iloc[pot_idx]), avg)
         else:
             out["f_w_today_vol_ratio"] = float("nan")
 
+        # B4: 最近 5 日聚合 (mean / std), 单日噪声 -> 趋势/稳定性
+        if pot_idx >= 5:
+            recent5_close = df["close"].iloc[pot_idx - 4: pot_idx + 1].astype(float)
+            recent5_high  = df["high"].iloc[pot_idx - 4: pot_idx + 1].astype(float)
+            recent5_low   = df["low"].iloc[pot_idx - 4: pot_idx + 1].astype(float)
+            recent5_vol   = df["volume"].iloc[pot_idx - 4: pot_idx + 1].astype(float)
+            rets5 = recent5_close.pct_change(fill_method=None).dropna()
+            amps5 = (recent5_high.values - recent5_low.values) / np.maximum(recent5_low.values, EPS)
+            out["f_w_ret_5d_mean"]      = float(rets5.mean()) if len(rets5) else float("nan")
+            out["f_w_ret_5d_std"]       = float(rets5.std())  if len(rets5) > 1 else float("nan")
+            out["f_w_amp_5d_mean"]      = float(np.mean(amps5))
+            out["f_w_amp_5d_std"]       = float(np.std(amps5))
+            # 量能 5 日稳定性 (mean/std)
+            if recent5_vol.mean() > 0:
+                out["f_w_vol_5d_cv"] = float(recent5_vol.std() / recent5_vol.mean())
+            else:
+                out["f_w_vol_5d_cv"] = float("nan")
+            # MACD hist 5 日均值 (动能持续度)
+            macd_hist5 = macd["hist"].iloc[-5:].dropna()
+            out["f_w_macd_hist_5d_mean"] = float(macd_hist5.mean()) if len(macd_hist5) else float("nan")
+            # MA cohesion 5 日趋势 (是否在收紧)
+            if len(self.ma_periods) >= 3 and len(win_close) >= max(self.ma_periods) + 5:
+                cohesion_series = []
+                for k in range(4, -1, -1):
+                    end_idx = pot_idx - k + 1
+                    if end_idx < max(self.ma_periods):
+                        continue
+                    sub_close = df["close"].iloc[: end_idx]
+                    ma_vals_t = [float(Indicators.sma(sub_close, n).iloc[-1]) for n in self.ma_periods]
+                    if all(not pd.isna(v) for v in ma_vals_t):
+                        ref = float(sub_close.iloc[-1])
+                        if ref > 0:
+                            cohesion_series.append(np.std(np.array(ma_vals_t) / ref))
+                if len(cohesion_series) >= 2:
+                    out["f_w_ma_cohesion_slope_5d"] = float(cohesion_series[-1] - cohesion_series[0])
+                else:
+                    out["f_w_ma_cohesion_slope_5d"] = float("nan")
+            else:
+                out["f_w_ma_cohesion_slope_5d"] = float("nan")
+        else:
+            for k in ("f_w_ret_5d_mean", "f_w_ret_5d_std", "f_w_amp_5d_mean",
+                       "f_w_amp_5d_std", "f_w_vol_5d_cv", "f_w_macd_hist_5d_mean",
+                       "f_w_ma_cohesion_slope_5d"):
+                out[k] = float("nan")
+
         return pd.Series(out)
 
     # ------------------------------------------------------------------
     def feature_names(self) -> List[str]:
-        names = ["code", "first_date", "potential_date", "gap_days_so_far"]
+        names = ["code", "first_date", "potential_date", "f_w_gap_so_far"]
         names += [
             "f_w_close_to_fc", "f_w_close_to_fo", "f_w_close_to_fh", "f_w_open_vs_fc",
             "f_w_broke_stop", "f_w_max_drawdown_from_fc", "f_w_max_high_over_fc",
@@ -239,6 +283,10 @@ class WashFeatures:
             "f_w_vol_shrink", "f_w_vol_shrink_streak", "f_w_recent_vol_ratio",
             "f_w_consol_days", "f_w_amp_mean", "f_w_amp_recent5", "f_w_amp_convergence",
             "f_w_today_ret", "f_w_today_amp", "f_w_today_vol_ratio",
+            "f_w_ret_5d_mean", "f_w_ret_5d_std",
+            "f_w_amp_5d_mean", "f_w_amp_5d_std",
+            "f_w_vol_5d_cv", "f_w_macd_hist_5d_mean",
+            "f_w_ma_cohesion_slope_5d",
         ]
         return names
 

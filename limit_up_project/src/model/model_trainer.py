@@ -43,6 +43,9 @@ class LimitUpModelTrainer:
         "n_estimators": 100,
         "verbose": -1,
         "random_state": 42,
+        # 类不平衡: 二分类时让 LGBM 自动按 (n_neg/n_pos) 加权
+        # 多分类下 LGBM 会忽略这个参数, 安全
+        "is_unbalance": True,
     }
 
     def __init__(self, config: Optional[dict] = None) -> None:
@@ -68,6 +71,8 @@ class LimitUpModelTrainer:
         X_valid: Optional[pd.DataFrame] = None,
         y_valid: Optional[pd.Series] = None,
         feature_names: Optional[List[str]] = None,
+        sample_weight: Optional[pd.Series] = None,
+        eval_sample_weight: Optional[pd.Series] = None,
     ):
         if not _HAS_LGB:
             raise ImportError("lightgbm is required for LimitUpModelTrainer.train()")
@@ -88,9 +93,15 @@ class LimitUpModelTrainer:
         }
         if n_classes <= 2:
             model_params["objective"] = "binary"
+            # 二分类时, 让 is_unbalance / scale_pos_weight 生效
+            if "is_unbalance" not in model_params and "scale_pos_weight" not in model_params:
+                model_params["is_unbalance"] = True
         else:
             model_params["objective"] = "multiclass"
             model_params["num_class"] = n_classes
+            # 多分类下 LightGBM 不识别 is_unbalance, 移除避免警告
+            model_params.pop("is_unbalance", None)
+            model_params.pop("scale_pos_weight", None)
 
         self.model = lgb.LGBMClassifier(**model_params)
         eval_set = (
@@ -98,7 +109,13 @@ class LimitUpModelTrainer:
             if X_valid is not None and y_valid is not None
             else None
         )
-        self.model.fit(X_train, y_train, eval_set=eval_set)
+        # B3: sample_weight 支持
+        fit_kwargs = {}
+        if sample_weight is not None:
+            fit_kwargs["sample_weight"] = sample_weight
+        if eval_set is not None and eval_sample_weight is not None:
+            fit_kwargs["eval_sample_weight"] = [eval_sample_weight]
+        self.model.fit(X_train, y_train, eval_set=eval_set, **fit_kwargs)
         self.feature_names_ = (
             list(feature_names) if feature_names is not None else list(X_train.columns)
         )
