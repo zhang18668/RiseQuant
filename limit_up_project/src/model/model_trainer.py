@@ -1,15 +1,12 @@
-"""M-001 模型训练器 (LightGBM 多分类)
+"""M-001 LightGBM trainer (binary/multiclass).
 
-封装一个最小可用的训练器:
-- ``train(X_train, y_train, X_valid=None, y_valid=None, feature_names=None)``
-- ``predict(X)``  -> 类别 (np.ndarray[int])
-- ``predict_proba(X)`` -> 概率矩阵 (np.ndarray[float, shape=(n, n_classes)])
-- ``save(path)`` / ``load(path)``
-- ``feature_importance()`` / ``get_feature_importance()`` -> pd.DataFrame
-- ``self.config`` -> 训练参数字典 (含 ``objective`` 等键)
+API:
+- train(X, y, X_val, y_val, feature_names, sample_weight,
+        eval_sample_weight, categorical_feature)
+- predict / predict_proba / save / load
+- feature_importance / get_feature_importance
 
-参数从 ``config["model"]["params"]`` 取 (允许只传 ``params`` 字典),
-缺省提供保守的默认值.
+Pattern-Cluster v2: added categorical_feature for plan B (cluster_id).
 """
 
 from __future__ import annotations
@@ -21,11 +18,11 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-try:  # pragma: no cover - 导入异常分支
+try:
     import lightgbm as lgb
     _HAS_LGB = True
-except Exception:  # noqa: BLE001
-    lgb = None  # type: ignore
+except Exception:
+    lgb = None
     _HAS_LGB = False
 
 from src.utils.logger import get_logger
@@ -34,8 +31,6 @@ logger = get_logger(__name__)
 
 
 class LimitUpModelTrainer:
-    """LightGBM 多分类训练器."""
-
     DEFAULT_PARAMS: Dict[str, Any] = {
         "objective": "multiclass",
         "num_leaves": 31,
@@ -43,8 +38,6 @@ class LimitUpModelTrainer:
         "n_estimators": 100,
         "verbose": -1,
         "random_state": 42,
-        # 类不平衡: 二分类时让 LGBM 自动按 (n_neg/n_pos) 加权
-        # 多分类下 LGBM 会忽略这个参数, 安全
         "is_unbalance": True,
     }
 
@@ -52,18 +45,16 @@ class LimitUpModelTrainer:
         cfg = config or {}
         params = dict(self.DEFAULT_PARAMS)
         if isinstance(cfg, dict):
-            # 同时兼容 ``{"params": {...}}`` 与 ``{"model": {"params": {...}}}``
             if "params" in cfg:
                 params.update(cfg.get("params", {}))
             params.update(cfg.get("model", {}).get("params", {}))
-        # 提供 ``self.config`` 别名, 方便外部读取
         self.params: Dict[str, Any] = params
         self.config: Dict[str, Any] = params
-        self.model = None  # type: ignore
+        self.model = None
         self.feature_names_: Optional[List[str]] = None
         self.classes_: Optional[np.ndarray] = None
+        self._categorical_feature: Optional[List[str]] = None
 
-    # ------------------------------------------------------------------
     def train(
         self,
         X_train: pd.DataFrame,
@@ -73,70 +64,65 @@ class LimitUpModelTrainer:
         feature_names: Optional[List[str]] = None,
         sample_weight: Optional[pd.Series] = None,
         eval_sample_weight: Optional[pd.Series] = None,
+        categorical_feature: Optional[List[str]] = None,
     ):
         if not _HAS_LGB:
-            raise ImportError("lightgbm is required for LimitUpModelTrainer.train()")
-
+            raise ImportError("lightgbm required")
         if len(X_train) == 0:
             raise ValueError("empty training data")
 
-        # 防御: 自动剔除非数值列 (如 datetime / object)
         X_train = self._coerce_numeric(X_train, drop_warning=True)
         if X_valid is not None:
             X_valid = self._coerce_numeric(X_valid, drop_warning=False)
 
-        y_series = pd.Series(y_train)
-        n_classes = int(y_series.nunique())
-
-        model_params = {
-            k: v for k, v in self.params.items() if k not in ("objective", "num_class")
-        }
+        n_classes = int(pd.Series(y_train).nunique())
+        mp = {k: v for k, v in self.params.items() if k not in ("objective", "num_class")}
         if n_classes <= 2:
-            model_params["objective"] = "binary"
-            # 二分类时, 让 is_unbalance / scale_pos_weight 生效
-            if "is_unbalance" not in model_params and "scale_pos_weight" not in model_params:
-                model_params["is_unbalance"] = True
+            mp["objective"] = "binary"
+            if "is_unbalance" not in mp and "scale_pos_weight" not in mp:
+                mp["is_unbalance"] = True
         else:
-            model_params["objective"] = "multiclass"
-            model_params["num_class"] = n_classes
-            # 多分类下 LightGBM 不识别 is_unbalance, 移除避免警告
-            model_params.pop("is_unbalance", None)
-            model_params.pop("scale_pos_weight", None)
+            mp["objective"] = "multiclass"
+            mp["num_class"] = n_classes
+            mp.pop("is_unbalance", None)
+            mp.pop("scale_pos_weight", None)
 
-        self.model = lgb.LGBMClassifier(**model_params)
-        eval_set = (
-            [(X_valid, y_valid)]
-            if X_valid is not None and y_valid is not None
-            else None
-        )
-        # B3: sample_weight 支持
-        fit_kwargs = {}
+        self.model = lgb.LGBMClassifier(**mp)
+        eval_set = ([(X_valid, y_valid)]
+                    if X_valid is not None and y_valid is not None else None)
+        fit_kwargs: Dict[str, Any] = {}
         if sample_weight is not None:
             fit_kwargs["sample_weight"] = sample_weight
         if eval_set is not None and eval_sample_weight is not None:
             fit_kwargs["eval_sample_weight"] = [eval_sample_weight]
+        if categorical_feature:
+            cats = [c for c in categorical_feature if c in X_train.columns]
+            if cats:
+                fit_kwargs["categorical_feature"] = cats
+                for c in cats:
+                    X_train[c] = X_train[c].astype("int64")
+                    if X_valid is not None and c in X_valid.columns:
+                        X_valid[c] = X_valid[c].astype("int64")
+                self._categorical_feature = list(cats)
         self.model.fit(X_train, y_train, eval_set=eval_set, **fit_kwargs)
-        self.feature_names_ = (
-            list(feature_names) if feature_names is not None else list(X_train.columns)
-        )
+        self.feature_names_ = (list(feature_names) if feature_names is not None
+                                else list(X_train.columns))
         self.classes_ = self.model.classes_
-        logger.info(
-            f"trained LGBM with {len(X_train)} samples, "
-            f"{len(self.feature_names_)} features"
-        )
+        logger.info(f"trained LGBM: {len(X_train)} samples, {len(self.feature_names_)} feats")
         return self.model
 
-    # ------------------------------------------------------------------
     @staticmethod
     def _coerce_numeric(X: pd.DataFrame, drop_warning: bool = False) -> pd.DataFrame:
-        """剔除非数值列 (datetime / object / category), 仅保留 LightGBM 能直接吃的列."""
-        numeric_cols = X.select_dtypes(include=["number", "bool"]).columns
-        dropped = [c for c in X.columns if c not in numeric_cols]
+        keep = ["number", "bool", "category"]
+        try:
+            cols = X.select_dtypes(include=keep).columns
+        except Exception:
+            cols = X.select_dtypes(include=["number", "bool"]).columns
+        dropped = [c for c in X.columns if c not in cols]
         if dropped and drop_warning:
-            logger.warning(f"dropping non-numeric feature columns: {dropped}")
-        return X[numeric_cols].copy()
+            logger.warning(f"dropping non-numeric cols: {dropped}")
+        return X[cols].copy()
 
-    # ------------------------------------------------------------------
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         self._check_fitted()
         X = self._coerce_numeric(X)
@@ -151,7 +137,6 @@ class LimitUpModelTrainer:
             X = X.reindex(columns=self.feature_names_, fill_value=0.0)
         return self.model.predict_proba(X)
 
-    # ------------------------------------------------------------------
     def save(self, path: str) -> None:
         self._check_fitted()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -161,31 +146,27 @@ class LimitUpModelTrainer:
                 "feature_names_": self.feature_names_,
                 "classes_": self.classes_,
                 "params": self.params,
+                "categorical_feature": self._categorical_feature,
             }, f)
 
     @classmethod
     def load(cls, path: str) -> "LimitUpModelTrainer":
         with open(path, "rb") as f:
             data = pickle.load(f)
-        trainer = cls(config={"model": {"params": data.get("params", {})}})
-        trainer.model = data["model"]
-        trainer.feature_names_ = data.get("feature_names_")
-        trainer.classes_ = data.get("classes_")
-        return trainer
+        t = cls(config={"model": {"params": data.get("params", {})}})
+        t.model = data["model"]
+        t.feature_names_ = data.get("feature_names_")
+        t.classes_ = data.get("classes_")
+        t._categorical_feature = data.get("categorical_feature")
+        return t
 
-    # ------------------------------------------------------------------
     def feature_importance(self) -> pd.Series:
-        """返回 (按重要性降序的) ``pd.Series``: index=feature_name."""
         self._check_fitted()
-        importances = pd.Series(
-            self.model.feature_importances_,
-            index=self.feature_names_,
-            name="importance",
-        )
-        return importances.sort_values(ascending=False)
+        s = pd.Series(self.model.feature_importances_,
+                      index=self.feature_names_, name="importance")
+        return s.sort_values(ascending=False)
 
     def get_feature_importance(self, top_n: Optional[int] = None) -> pd.DataFrame:
-        """返回宽表 ``feature, importance`` (按重要性降序)."""
         s = self.feature_importance()
         df = s.reset_index()
         df.columns = ["feature", "importance"]
@@ -193,7 +174,6 @@ class LimitUpModelTrainer:
             df = df.head(int(top_n))
         return df.reset_index(drop=True)
 
-    # ------------------------------------------------------------------
     def _check_fitted(self) -> None:
         if self.model is None:
-            raise RuntimeError("model has not been trained yet")
+            raise RuntimeError("model not trained yet")
