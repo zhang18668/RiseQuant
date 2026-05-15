@@ -479,7 +479,7 @@ class Backtester:
         cummax = equity.cummax()
         max_drawdown = float((equity / cummax - 1.0).min()) if not cummax.empty else 0.0
 
-        sell_trades = [t for t in self.trades if t.action == "SELL"]
+        sell_trades = [t for t in self.trades if str(t.action).startswith("SELL")]
         if sell_trades:
             wins = sum(1 for t in sell_trades if t.return_pct > 0)
             win_rate = wins / len(sell_trades)

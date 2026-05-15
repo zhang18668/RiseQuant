@@ -105,7 +105,15 @@ def main():
     X = features_df.reindex(columns=trainer.feature_names_, fill_value=0).fillna(0)
     proba = trainer.predict_proba(X)
     signals = features_df[["first_date", "code"]].rename(columns={"first_date": "date"}).copy()
-    signals["score"] = proba[:, -1]  # 最大类别概率作为 score
+
+    # 如果是3分类 (0/1/2), 取正类 (1+2) 的概率之和作为 score
+    if proba.shape[1] == 3:
+        # proba[:, 0] = 失败, proba[:, 1] = 二板, proba[:, 2] = 完美
+        # score = P(正类) = P(1) + P(2)
+        signals["score"] = proba[:, 1] + proba[:, 2]
+    else:
+        # 二分类: score = P(正类)
+        signals["score"] = proba[:, -1]
 
     # 5) 回测 — 命令行可覆盖风控参数
     bt = Backtester(

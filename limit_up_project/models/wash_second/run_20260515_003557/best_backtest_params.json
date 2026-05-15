@@ -1,0 +1,8 @@
+{
+  "min_score": 0.68,
+  "topk": 3,
+  "sell_n": 2,
+  "trailing_stop": 0.04,
+  "take_profit": 0.0,
+  "cooldown_after_stop": 5
+}

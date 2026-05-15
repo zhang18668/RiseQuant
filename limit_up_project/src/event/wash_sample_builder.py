@@ -205,18 +205,3 @@ class WashSampleBuilder:
                     continue  # 已成功的不算 failed
                 out.append((str(code), pd.Timestamp(g["date"].iloc[i]), float(g["open"].iloc[i])))
         return out
- (df["change_pct"] >= self.threshold)
-        for code, g in df.groupby("code", sort=False):
-            g = g.reset_index(drop=True)
-            lu_arr = (g["change_pct"] >= self.threshold).to_numpy()
-            n = len(g)
-            for i in range(n):
-                if not lu_arr[i]:
-                    continue
-                lo = max(0, i - self.cooldown_days)
-                if lu_arr[lo:i].any():
-                    continue
-                if (str(code), pd.Timestamp(g["date"].iloc[i])) in success_first:
-                    continue
-                out.append((str(code), pd.Timestamp(g["date"].iloc[i]), float(g["open"].iloc[i])))
-        return out

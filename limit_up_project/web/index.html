@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RiseQuant 选股工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <button id="collapseBtn" class="collapse-btn" title="收起侧栏">≡</button>
+      <div class="brand">
+        <div>
+          <h1>RiseQuant</h1>
+          <p>尾盘选股与交易复盘</p>
+        </div>
+      </div>
+
+      <label class="field">
+        <span>模型版本</span>
+        <select id="modelSelect"></select>
+      </label>
+
+      <div id="modelMeta" class="meta"></div>
+
+      <nav class="tabs" aria-label="工作区">
+        <button class="tab active" data-tab="signals">尾盘买入</button>
+        <button class="tab" data-tab="trades">交易复盘</button>
+        <button class="tab" data-tab="equity">净值曲线</button>
+      </nav>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div>
+          <h2 id="pageTitle">14:30-14:50 尾盘确认买入</h2>
+          <p id="statusText">正在加载模型...</p>
+        </div>
+        <div class="toolbar">
+          <label>
+            <span>日期</span>
+            <select id="dateSelect"></select>
+          </label>
+          <label>
+            <span>最低分</span>
+            <input id="minScoreInput" type="number" min="0" max="1" step="0.01" value="0.68" />
+          </label>
+          <label>
+            <span>最多只数</span>
+            <input id="topInput" type="number" min="1" max="10" step="1" value="10" />
+          </label>
+          <button id="refreshBtn" class="primary">刷新</button>
+        </div>
+      </header>
+
+      <section id="signalsView" class="view active">
+        <div class="notice">
+          这里展示的是尾盘 14:30-14:50 的“确认买入清单”。它不是回测成交明细；是否成交由你确认下单后决定。
+        </div>
+        <div class="panel grid-two">
+          <div>
+            <div class="section-title">
+              <h3>今日应买清单</h3>
+              <span id="signalCount">0 只</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>排名</th>
+                    <th>股票</th>
+                    <th>选股时间</th>
+                    <th>分数</th>
+                    <th>建议</th>
+                    <th>仓位</th>
+                    <th>收盘</th>
+                    <th>涨跌幅</th>
+                    <th>止损位</th>
+                  </tr>
+                </thead>
+                <tbody id="signalsBody"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="chart-panel">
+            <div class="section-title">
+              <h3 id="chartTitle">K线与买卖结构</h3>
+              <div class="chart-actions">
+                <button id="dailyBtn" class="mini active">日K</button>
+                <button id="minuteBtn" class="mini">分时</button>
+                <button id="zoomInBtn" class="mini">+</button>
+                <button id="zoomOutBtn" class="mini">-</button>
+                <button id="resetZoomBtn" class="mini">重置</button>
+              </div>
+            </div>
+            <div id="chartHint" class="chart-hint">移动鼠标查看日期、开高低收、成交量、成交额、换手率；绿色为确认买入点，红色为确认卖出点。</div>
+            <canvas id="klineCanvas" width="1180" height="620"></canvas>
+            <div id="klineTooltip" class="kline-tooltip"></div>
+            <div class="trade-path">
+              <div class="section-title compact">
+                <h3>这只票的买卖路径</h3>
+                <span id="pathSummary">等待选择股票</span>
+              </div>
+              <div class="table-wrap small">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>信号/买入日</th>
+                      <th>价格</th>
+                      <th>卖出日</th>
+                      <th>卖出价</th>
+                      <th>卖出原因</th>
+                      <th>持有</th>
+                      <th>收益率</th>
+                    </tr>
+                  </thead>
+                  <tbody id="tradePathBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tradesView" class="view">
+        <div class="panel">
+          <div class="section-title">
+            <h3>历史成交明细</h3>
+            <input id="tradeCodeInput" placeholder="输入股票代码过滤" />
+          </div>
+          <div class="table-wrap tall">
+            <table>
+              <thead>
+                <tr>
+                  <th>日期</th>
+                  <th>股票</th>
+                  <th>动作</th>
+                  <th>价格</th>
+                  <th>金额</th>
+                  <th>收益</th>
+                  <th>收益率</th>
+                </tr>
+              </thead>
+              <tbody id="tradesBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="equityView" class="view">
+        <div class="panel">
+          <div class="section-title">
+            <h3>净值曲线</h3>
+            <span id="equitySummary"></span>
+          </div>
+          <canvas id="equityCanvas" width="1260" height="520"></canvas>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

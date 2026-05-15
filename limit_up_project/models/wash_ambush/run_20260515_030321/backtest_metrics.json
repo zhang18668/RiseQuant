@@ -1,0 +1,19 @@
+{
+  "initial_cash": 10000000.0,
+  "final_value": 10662652.303142956,
+  "total_return": 0.06626523031429565,
+  "annual_return": 0.07029717666817348,
+  "sharpe_ratio": 1.3771636356443393,
+  "max_drawdown": -0.030009500337667028,
+  "num_trades": 107,
+  "win_rate": 0.41509433962264153,
+  "sell_reasons": {
+    "SELL_TRAILING_STOP": 46,
+    "SELL_TIME_STOP": 6,
+    "SELL_STOP_DYNAMIC": 1
+  },
+  "sell_avg_return": 0.017812192574488538,
+  "sell_median_return": -0.025650321761986672,
+  "sell_max_loss": -0.1331269349845201,
+  "sell_max_gain": 0.7116033872631033
+}
