@@ -13,8 +13,10 @@ Usage (Windows, single-line commands):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -82,6 +84,12 @@ def parse_args():
                    help="LightGBM 单模型线程数; -1 使用全部核心, 1 适合配合 --cluster-train-jobs")
     p.add_argument("--cluster-train-jobs", type=int, default=1,
                    help="per_cluster 方案同时训练多少个 cluster 模型")
+    p.add_argument("--feature-jobs", type=int, default=1,
+                   help="Step 8 feature engineering worker process count")
+    p.add_argument("--feature-cache", action="store_true",
+                   help="cache Step 8 features and reuse when inputs/params/code match")
+    p.add_argument("--feature-cache-dir", default=None,
+                   help="feature cache directory, default: <out>/feature_cache")
     p.add_argument("--save-training-data", action="store_true",
                    help="把训练用 samples + features 也存进 shared/ (可追溯, 但占空间)")
     p.add_argument("--skip-dryrun-abort", action="store_true",
@@ -153,44 +161,222 @@ def build_samples(events: pd.DataFrame, daily: pd.DataFrame, args) -> pd.DataFra
 
 
 # ============================================================
-def compute_features(samples: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
-    """Step 8: 算 wash + market features (复用现有模块)."""
-    logger.info("Step 8: 特征工程 (WashFeatures + MarketFeatures)")
+def _hash_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _hash_frame(df: pd.DataFrame, cols: List[str]) -> str:
+    present = [c for c in cols if c in df.columns]
+    if not present:
+        return "empty"
+    part = df[present].copy()
+    for c in present:
+        if pd.api.types.is_datetime64_any_dtype(part[c]):
+            part[c] = part[c].astype("datetime64[ns]").astype("int64")
+    values = pd.util.hash_pandas_object(part, index=False).values
+    return hashlib.sha256(values.tobytes()).hexdigest()
+
+
+def _feature_cache_key(samples: pd.DataFrame, daily: pd.DataFrame, args) -> str:
+    payload = {
+        "version": 1,
+        "args": {
+            "start": args.start,
+            "end": args.end,
+            "tdx_path": str(args.tdx_path),
+            "golden_lo": args.golden_lo,
+            "golden_hi": args.golden_hi,
+            "golden_horizon": args.golden_horizon,
+            "max_gap": args.max_gap,
+            "positive_window": args.positive_window,
+        },
+        "code_hashes": {
+            "wash_features.py": _hash_file(ROOT / "src" / "feature" / "wash_features.py"),
+            "market_features.py": _hash_file(ROOT / "src" / "feature" / "market_features.py"),
+            "technical_indicators.py": _hash_file(ROOT / "src" / "feature" / "technical_indicators.py"),
+            "wash_sample_builder.py": _hash_file(ROOT / "src" / "event" / "wash_sample_builder.py"),
+            "wash_second_detector.py": _hash_file(ROOT / "src" / "event" / "wash_second_detector.py"),
+            "golden_label_filter.py": _hash_file(ROOT / "src" / "event" / "golden_label_filter.py"),
+        },
+        "samples": {
+            "rows": int(len(samples)),
+            "hash": _hash_frame(
+                samples,
+                [
+                    "sample_id", "code", "first_date", "potential_date",
+                    "label_pre", "sample_weight", "stop_loss_price",
+                    "first_open", "is_golden_event",
+                ],
+            ),
+        },
+        "daily": {
+            "rows": int(len(daily)),
+            "hash": _hash_frame(
+                daily,
+                [
+                    "date", "code", "open", "high", "low", "close",
+                    "volume", "turnover", "change_pct",
+                ],
+            ),
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _feature_cache_paths(args, out_root: Path, key: str) -> Tuple[Path, Path]:
+    cache_dir = Path(args.feature_cache_dir) if args.feature_cache_dir else out_root / "feature_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"features_{key}.pkl.gz", cache_dir / f"features_{key}.json"
+
+
+def _compute_feature_rows(samples_chunk: pd.DataFrame, daily_by_code: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     wf = WashFeatures()
-    daily_by_code = {c: g.sort_values("date").reset_index(drop=True)
-                     for c, g in daily.groupby("code")}
     rows = []
-    for i, r in samples.iterrows():
-        sub = daily_by_code.get(r["code"])
+    for r in samples_chunk.itertuples(index=False):
+        code = str(getattr(r, "code")).zfill(6)
+        sub = daily_by_code.get(code)
         if sub is None:
             continue
-        feats = wf.calculate(sub, r["first_date"], r["potential_date"]).to_dict()
-        feats["sample_id"]      = r["sample_id"]
-        feats["label_pre"]      = int(r["label_pre"])
-        feats["sample_weight"]  = float(r["sample_weight"])
-        feats["stop_loss_price"]= float(r["stop_loss_price"])
-        feats["first_open"]     = float(r["first_open"])
+        feats = wf.calculate(sub, getattr(r, "first_date"), getattr(r, "potential_date")).to_dict()
+        feats["sample_id"] = getattr(r, "sample_id")
+        feats["label_pre"] = int(getattr(r, "label_pre"))
+        feats["sample_weight"] = float(getattr(r, "sample_weight"))
+        feats["stop_loss_price"] = float(getattr(r, "stop_loss_price"))
+        feats["first_open"] = float(getattr(r, "first_open"))
         rows.append(feats)
-        if (i + 1) % 2000 == 0:
-            logger.info(f"  wash feature progress: {i+1}/{len(samples)}")
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
+    return pd.DataFrame(rows)
 
+
+def _compute_feature_partition(payload: Tuple[int, pd.DataFrame, Dict[str, pd.DataFrame]]) -> Tuple[int, int, pd.DataFrame]:
+    worker_id, samples_chunk, daily_chunk = payload
+    return worker_id, len(samples_chunk), _compute_feature_rows(samples_chunk, daily_chunk)
+
+
+def _feature_partitions(
+    samples: pd.DataFrame,
+    daily_by_code: Dict[str, pd.DataFrame],
+    n_jobs: int,
+) -> List[Tuple[int, pd.DataFrame, Dict[str, pd.DataFrame]]]:
+    normalized_codes = samples["code"].astype(str).str.zfill(6)
+    code_counts = normalized_codes.groupby(normalized_codes).size().sort_values(ascending=False)
+    buckets: List[List[str]] = [[] for _ in range(n_jobs)]
+    bucket_sizes = [0 for _ in range(n_jobs)]
+    for code, count in code_counts.items():
+        idx = int(np.argmin(bucket_sizes))
+        buckets[idx].append(str(code))
+        bucket_sizes[idx] += int(count)
+
+    parts = []
+    for i, codes in enumerate(buckets):
+        if not codes:
+            continue
+        code_set = set(codes)
+        chunk = samples[normalized_codes.isin(code_set)].copy()
+        daily_chunk = {c: daily_by_code[c] for c in codes if c in daily_by_code}
+        parts.append((i, chunk, daily_chunk))
+    return parts
+
+
+def _append_market_features(features: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame:
+    if features.empty:
+        return features
     market_data = market_proxy_from_daily(daily)
     mf = MarketFeatures()
-    df["potential_date"] = pd.to_datetime(df["potential_date"])
-    unique_dates = df["potential_date"].drop_duplicates().sort_values()
+    features = features.copy()
+    features["potential_date"] = pd.to_datetime(features["potential_date"])
+    unique_dates = features["potential_date"].drop_duplicates().sort_values()
     mkt_rows = [mf.calculate_at_event(d, market_data) for d in unique_dates]
     mkt_df = pd.DataFrame(mkt_rows)
     if not mkt_df.empty:
         mkt_df["event_date"] = pd.to_datetime(mkt_df["event_date"])
         mkt_df = mkt_df.rename(columns={"event_date": "potential_date"})
-        df = df.merge(mkt_df, on="potential_date", how="left")
+        features = features.merge(mkt_df, on="potential_date", how="left")
+    return features
+
+
+def compute_features(
+    samples: pd.DataFrame,
+    daily: pd.DataFrame,
+    args=None,
+    out_root: Optional[Path] = None,
+) -> pd.DataFrame:
+    """Step 8: 算 wash + market features (复用现有模块)."""
+    logger.info("Step 8: 特征工程 (WashFeatures + MarketFeatures)")
+
+    cache_file = None
+    cache_meta = None
+    if args is not None and out_root is not None and getattr(args, "feature_cache", False):
+        logger.info("  feature cache: checking inputs/params/code fingerprint...")
+        key = _feature_cache_key(samples, daily, args)
+        cache_file, cache_meta = _feature_cache_paths(args, out_root, key)
+        if cache_file.exists():
+            logger.info(f"  feature cache HIT: {cache_file}")
+            return pd.read_pickle(cache_file, compression="gzip")
+        logger.info(f"  feature cache MISS: {cache_file}")
+
+    jobs = max(1, int(getattr(args, "feature_jobs", 1) if args is not None else 1))
+    daily_by_code = {str(c).zfill(6): g.sort_values("date").reset_index(drop=True)
+                     for c, g in daily.groupby("code")}
+
+    if jobs == 1:
+        rows = []
+        wf = WashFeatures()
+        for i, r in samples.iterrows():
+            sub = daily_by_code.get(str(r["code"]).zfill(6))
+            if sub is None:
+                continue
+            feats = wf.calculate(sub, r["first_date"], r["potential_date"]).to_dict()
+            feats["sample_id"]      = r["sample_id"]
+            feats["label_pre"]      = int(r["label_pre"])
+            feats["sample_weight"]  = float(r["sample_weight"])
+            feats["stop_loss_price"]= float(r["stop_loss_price"])
+            feats["first_open"]     = float(r["first_open"])
+            rows.append(feats)
+            if (i + 1) % 2000 == 0:
+                logger.info(f"  wash feature progress: {i+1}/{len(samples)}")
+        df = pd.DataFrame(rows)
+    else:
+        parts = _feature_partitions(samples, daily_by_code, jobs)
+        logger.info(f"  parallel wash features: {len(parts)} partitions, {jobs} workers")
+        done = 0
+        frames = []
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            futures = [executor.submit(_compute_feature_partition, part) for part in parts]
+            for future in as_completed(futures):
+                worker_id, count, frame = future.result()
+                done += count
+                frames.append(frame)
+                logger.info(f"  wash feature chunk {worker_id} done: {done}/{len(samples)}")
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df = _append_market_features(df, daily)
 
     n_wash = sum(1 for c in df.columns if c.startswith("f_w_"))
     n_mkt  = sum(1 for c in df.columns if c.startswith("f_mkt_"))
     logger.info(f"  特征表 {len(df)} 行 × ({n_wash} wash + {n_mkt} market) = {n_wash + n_mkt} 维")
+    if cache_file is not None and cache_meta is not None:
+        df.to_pickle(cache_file, compression="gzip")
+        with cache_meta.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "cache_file": str(cache_file),
+                    "rows": int(len(df)),
+                    "created_at": datetime.now().isoformat(timespec="seconds"),
+                    "feature_jobs": jobs,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+        logger.info(f"  feature cache saved: {cache_file}")
     return df
 
 
@@ -300,7 +486,7 @@ def train_one_window(
 
     events, daily = detect_and_label(daily, args)
     samples = build_samples(events, daily, args)
-    features = compute_features(samples, daily)
+    features = compute_features(samples, daily, args=args, out_root=out_root)
     if features.empty:
         logger.error("特征为空, 退出")
         return arch.run_dir
