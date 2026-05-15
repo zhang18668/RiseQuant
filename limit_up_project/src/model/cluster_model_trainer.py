@@ -13,6 +13,7 @@ usable 判定规则 (与文档 §8 对齐):
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -74,6 +75,7 @@ class ClusterModelTrainer:
     cluster_col: str = "cluster_id"
     label_col: str = "label_pre"
     weight_col: Optional[str] = "sample_weight"
+    n_jobs: int = 1
 
     # ------------------------------------------------------------------
     def train(
@@ -119,13 +121,35 @@ class ClusterModelTrainer:
         cluster_ids = sorted([int(c) for c in df[self.cluster_col].unique() if int(c) >= 0])
         logger.info(f"ClusterModelTrainer: {len(cluster_ids)} 个 cluster 待训练")
 
-        for cid in cluster_ids:
-            sub = df[df[self.cluster_col] == cid].copy()
-            logger.info(f"--- cluster {cid}: {len(sub)} 样本 ---")
-            artifact = self._train_one(sub, cid, train_end, valid_end, test_end, split_method)
-            out[cid] = artifact
+        jobs = max(1, int(self.n_jobs or 1))
+        if jobs == 1 or len(cluster_ids) <= 1:
+            for cid in cluster_ids:
+                sub = df[df[self.cluster_col] == cid].copy()
+                logger.info(f"--- cluster {cid}: {len(sub)} 样本 ---")
+                artifact = self._train_one(sub, cid, train_end, valid_end, test_end, split_method)
+                out[cid] = artifact
+        else:
+            logger.info(f"ClusterModelTrainer: parallel training with {jobs} workers")
+            grouped = {cid: df[df[self.cluster_col] == cid].copy() for cid in cluster_ids}
+            with ThreadPoolExecutor(max_workers=jobs) as executor:
+                futures = {
+                    executor.submit(
+                        self._train_one,
+                        sub,
+                        cid,
+                        train_end,
+                        valid_end,
+                        test_end,
+                        split_method,
+                    ): cid
+                    for cid, sub in grouped.items()
+                }
+                for future in as_completed(futures):
+                    cid = futures[future]
+                    out[cid] = future.result()
+                    logger.info(f"--- cluster {cid}: done ---")
 
-        return out
+        return {cid: out[cid] for cid in cluster_ids if cid in out}
 
     # ------------------------------------------------------------------
     def _train_one(

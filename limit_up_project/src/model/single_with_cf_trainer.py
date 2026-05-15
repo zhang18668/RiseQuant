@@ -27,6 +27,20 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return value
+    if isinstance(value, (np.floating, np.integer)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 @dataclass
 class SingleWithCFArtifact:
     """方案 B 训练产物."""
@@ -44,11 +58,9 @@ class SingleWithCFArtifact:
             "n_train": int(self.n_train),
             "n_valid": int(self.n_valid),
             "n_test": int(self.n_test),
-            "metrics_overall": {k: float(v) if isinstance(v, (int, float, np.floating, np.integer)) else v
-                                 for k, v in (self.metrics or {}).items()},
+            "metrics_overall": _json_safe(self.metrics or {}),
             "metrics_per_cluster": {
-                int(k): {kk: float(vv) if isinstance(vv, (int, float, np.floating, np.integer)) else vv
-                          for kk, vv in (m or {}).items()}
+                int(k): _json_safe(m or {})
                 for k, m in (self.metrics_per_cluster or {}).items()
             },
         }

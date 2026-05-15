@@ -78,6 +78,10 @@ def parse_args():
     p.add_argument("--out", default="./models/pattern_cluster",
                    help="bundle 输出根目录")
     p.add_argument("--n-estimators", type=int, default=200)
+    p.add_argument("--model-n-jobs", type=int, default=-1,
+                   help="LightGBM 单模型线程数; -1 使用全部核心, 1 适合配合 --cluster-train-jobs")
+    p.add_argument("--cluster-train-jobs", type=int, default=1,
+                   help="per_cluster 方案同时训练多少个 cluster 模型")
     p.add_argument("--save-training-data", action="store_true",
                    help="把训练用 samples + features 也存进 shared/ (可追溯, 但占空间)")
     p.add_argument("--skip-dryrun-abort", action="store_true",
@@ -321,7 +325,11 @@ def train_one_window(
                     if c.startswith("f_w_") or c.startswith("f_mkt_")]
 
     # 训练
-    model_params = {"n_estimators": args.n_estimators, "verbose": -1}
+    model_params = {
+        "n_estimators": args.n_estimators,
+        "n_jobs": args.model_n_jobs,
+        "verbose": -1,
+    }
     cluster_artifacts: Dict[int, Any] = {}
     single_artifact = None
 
@@ -332,6 +340,7 @@ def train_one_window(
             min_auc_test=args.min_auc_test,
             model_params=model_params,
             feature_cols=feature_cols,
+            n_jobs=args.cluster_train_jobs,
         )
         cluster_artifacts = cmt.train(
             samples, features,

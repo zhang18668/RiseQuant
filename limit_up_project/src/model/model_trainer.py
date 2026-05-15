@@ -36,6 +36,7 @@ class LimitUpModelTrainer:
         "num_leaves": 31,
         "learning_rate": 0.05,
         "n_estimators": 100,
+        "n_jobs": -1,
         "verbose": -1,
         "random_state": 42,
         "is_unbalance": True,
