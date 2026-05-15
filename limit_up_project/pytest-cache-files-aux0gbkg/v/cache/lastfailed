@@ -1,0 +1,3 @@
+{
+  "tests/test_event/test_limit_up_detector.py::TestLimitUpDetector::test_detect_returns_correct_columns": true
+}

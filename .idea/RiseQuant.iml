@@ -5,7 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/limit_up_project" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.13 (RiseQuant) (2)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.14 (RiseQuant) (2)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

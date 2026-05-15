@@ -5,18 +5,17 @@ data:
   end_date: "2026-12-31"
 
 event:
-  limit_up_threshold: 9.9    # 涨停阈值%
-  exclude_st: true            # 排除ST股
-  second_board_days: 5        # 二板判定窗口（交易日）
-  main_wave_days: 10         # 主升浪观察窗口（交易日）
-  main_wave_return: 0.15     # 主升浪涨幅阈值
+  limit_up_threshold: 9.9
+  exclude_st: true
+  second_board_days: 5
+  main_wave_days: 10
+  main_wave_return: 0.15
 
 feature:
-  pre_trend_window_1m: 20    # 涨停前1个月窗口
-  pre_trend_window_2m: 40    # 涨停前2个月窗口
-  # F-007/F-008 特征开关
-  use_technical: true        # MA/EMA/MACD/RSI/BOLL/KDJ/ATR
-  use_market: true           # 大盘点位/趋势/量能
+  pre_trend_window_1m: 20
+  pre_trend_window_2m: 40
+  use_technical: true
+  use_market: true
   price_volume:
     returns_n: [1, 3, 5, 10, 20]
     volume_rolling_n: [5, 10]
@@ -28,47 +27,52 @@ feature:
 model:
   type: "lightgbm"
   params:
-    num_leaves: 31
-    learning_rate: 0.05
-    n_estimators: 100
+    num_leaves: 15
+    learning_rate: 0.01
+    n_estimators: 300
+    min_child_samples: 50
+    feature_fraction: 0.6
+    bagging_fraction: 0.6
+    bagging_freq: 3
+    lambda_l1: 0.2
+    lambda_l2: 0.2
+    max_depth: 5
+    min_split_gain: 0.1
     verbose: -1
 
 dataset:
-  # 切分策略:
-  #   "ratio" — 按 test_ratio/valid_ratio 比例 (严格时间序 + 日期边界对齐)
-  #   "date"  — 按下面的 train_end/valid_end/test_end 显式日期切分 (推荐)
   split_method: "date"
   test_ratio: 0.2
   valid_ratio: 0.1
-  # split_method=date 时生效: 日期均为闭区间右边界
-  #   train: date <= train_end
-  #   valid: train_end < date <= valid_end
-  #   test : valid_end < date <= test_end (留空表示不限)
   train_end: "2022-12-31"
   valid_end: "2023-06-30"
-  test_end:  "2023-12-31"
-  # 若使用 purged k-fold, 训练-测试间留出的禁运天数
+  test_end: "2023-12-31"
   purged_kfold_embargo_days: 10
-  # 模型保存目录
   model_dir: "./models"
 
 backtest:
-  # 回测时间窗口: 只把 daily_data 中该区间内的样本拿去回测
-  # 留空时回测全部数据
   start_date: "2024-01-06"
   end_date: "2024-12-31"
   initial_cash: 10000000
   benchmark: "SH000300"
-  topk: 10
+  topk: 3
   sell_n: 5
   slippage: 0.003
-  # 杜绝未来函数: T 日产生信号, T+entry_delay 个交易日的开盘成交.
-  # >=1 表示信号收盘后产生、次日开盘成交; 设为 0 会触发警告.
   entry_delay: 1
-  # ---- 风控 (这是逼近"高胜率 / 小回撤"的真正杠杆) ----
-  min_score: 0.0          # 概率阈值, 例如 0.7 只买高置信信号
-  stop_loss: 0.03         # 硬止损 -3% 立即出场 (0 表示关闭)
-  take_profit: 0.0        # 硬止盈 (0 表示关闭, 例 0.10 表示 +10% 兑现)
-  trailing_stop: 0.0      # 移动止盈 (0 表示关闭, 例 0.05 表示从最高回撤 5% 出)
-  skip_zhangting_open: true   # T+1 一字涨停 (>=9.5% 高开) 不买
-  cooldown_after_stop: 5  # 止损 (含动态止损) 后该 code 在 N 个交易日内禁买
+  min_score: 0.62
+  stop_loss: 0.03
+  take_profit: 0.08
+  trailing_stop: 0.04
+  skip_zhangting_open: true
+  cooldown_after_stop: 5
+
+  # Search execution parameters and select the Sharpe-first result.
+  optimize: true
+  optimize_grid:
+    min_score_grid: [0.58, 0.60, 0.62, 0.65, 0.68, 0.70]
+    topk_grid: [1, 2, 3]
+    sell_n_grid: [2, 3, 5]
+    trailing_stop_grid: [0.03, 0.04]
+    take_profit_grid: [0.0, 0.08]
+    cooldown_after_stop_grid: [5]
+    min_sells: 20

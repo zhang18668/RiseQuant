@@ -1,0 +1,49 @@
+{
+  "run_id": "20260515_030321",
+  "strategy": "wash_ambush",
+  "run_dir": "models\\wash_ambush\\run_20260515_030321",
+  "artifacts": [
+    "config.json",
+    "model.pkl",
+    "train_metrics.json",
+    "feature_importance.csv",
+    "backtest_grid.csv",
+    "best_backtest_params.json",
+    "backtest_metrics.json",
+    "equity_curve.csv",
+    "trades.csv",
+    "signals.csv"
+  ],
+  "train_metrics": {
+    "accuracy": 0.8016,
+    "precision": 0.6775510204081633,
+    "recall": 0.09105869445968184,
+    "f1": 0.16054158607350097,
+    "confusion_matrix": "[[6848   79]\n [1657  166]]",
+    "labels": [
+      0,
+      1
+    ],
+    "auc": 0.8211431636292308,
+    "ic": 0.19608915156719417
+  },
+  "backtest_metrics": {
+    "initial_cash": 10000000.0,
+    "final_value": 10662652.303142956,
+    "total_return": 0.06626523031429565,
+    "annual_return": 0.07029717666817348,
+    "sharpe_ratio": 1.3771636356443393,
+    "max_drawdown": -0.030009500337667028,
+    "num_trades": 107,
+    "win_rate": 0.41509433962264153,
+    "sell_reasons": {
+      "SELL_TRAILING_STOP": 46,
+      "SELL_TIME_STOP": 6,
+      "SELL_STOP_DYNAMIC": 1
+    },
+    "sell_avg_return": 0.017812192574488538,
+    "sell_median_return": -0.025650321761986672,
+    "sell_max_loss": -0.1331269349845201,
+    "sell_max_gain": 0.7116033872631033
+  }
+}

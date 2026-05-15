@@ -87,6 +87,7 @@ def compute_features(samples: pd.DataFrame, daily: pd.DataFrame) -> pd.DataFrame
         feats["sample_weight"]  = float(r["sample_weight"])
         feats["stop_loss_price"]= float(r["stop_loss_price"])
         feats["first_open"]     = float(r["first_open"])
+        feats["first_close"]    = float(r["first_close"]) if pd.notna(r["first_close"]) else float("nan")
         feats["days_to_second"] = int(r["days_to_second"]) if r["days_to_second"] != -1 else -1
         rows.append(feats)
         if (i + 1) % 2000 == 0:
@@ -207,7 +208,7 @@ def backtest(features_df: pd.DataFrame, trainer, daily: pd.DataFrame, full_cfg: 
     # 二分类: 取 P(label=1) (即"未来 K 日内出第二涨停"的概率)
     p_pos = proba[:, 1] if proba.shape[1] >= 2 else proba[:, 0]
 
-    signals = features_df[["potential_date", "stop_loss_price"]].copy()
+    signals = features_df[["potential_date", "stop_loss_price", "first_close", "first_open"]].copy()
     signals["code"] = features_df["sample_id"].str.split("_").str[0]
     signals = signals.rename(columns={"potential_date": "date"})
     signals["score"] = p_pos
@@ -222,6 +223,12 @@ def backtest(features_df: pd.DataFrame, trainer, daily: pd.DataFrame, full_cfg: 
         signals = signals[signals["date"] <= pd.Timestamp(bt_end)]
         daily   = daily[daily["date"]   <= pd.Timestamp(bt_end)]
     logger.info(f"  回测 {bt_start or 'begin'} ~ {bt_end or 'end'}, 信号 {len(signals)} 条")
+
+    if full_cfg.get("optimize_backtest", False):
+        best_params, _ = optimize_backtest_params(signals, daily, full_cfg, arch)
+        if best_params:
+            full_cfg = {**full_cfg, **best_params}
+            logger.info(f"  best backtest params: {best_params}")
 
     bt = Backtester(
         initial_cash=full_cfg.get("initial_cash", 10_000_000),
@@ -256,6 +263,132 @@ def backtest(features_df: pd.DataFrame, trainer, daily: pd.DataFrame, full_cfg: 
     return bt
 
 
+def _as_list(v, default):
+    if v is None:
+        return list(default)
+    if isinstance(v, (list, tuple, set)):
+        return list(v)
+    return [v]
+
+
+def _save_grid(arch: RunArchive, grid_df: pd.DataFrame) -> None:
+    if grid_df.empty:
+        return
+    path = arch.run_dir / "backtest_grid.csv"
+    grid_df.to_csv(path, index=False, encoding="utf-8-sig")
+    try:
+        arch._summary["artifacts"].append("backtest_grid.csv")
+    except Exception:
+        pass
+
+
+def _run_bt_with_params(signals: pd.DataFrame, daily: pd.DataFrame, full_cfg: dict, params: dict):
+    bt = Backtester(
+        initial_cash=full_cfg.get("initial_cash", 10_000_000),
+        topk=params.get("topk", full_cfg.get("topk", 5)),
+        sell_n=params.get("sell_n", full_cfg.get("sell_n", 8)),
+        slippage=full_cfg.get("slippage", 0.003),
+        entry_delay=1,
+        min_score=params.get("min_score", full_cfg.get("min_score", 0.6)),
+        stop_loss=0.0,
+        take_profit=params.get("take_profit", full_cfg.get("take_profit", 0.0)),
+        trailing_stop=params.get("trailing_stop", full_cfg.get("trailing_stop", 0.0)),
+        skip_zhangting_open=True,
+        cooldown_after_stop=params.get("cooldown_after_stop", full_cfg.get("cooldown_after_stop", 5)),
+    )
+    bt.run(signals, daily)
+    return bt
+
+
+def optimize_backtest_params(signals: pd.DataFrame, daily: pd.DataFrame, full_cfg: dict, arch: RunArchive):
+    """Grid-search execution params and choose a Sharpe-first configuration."""
+    cfg = full_cfg.get("backtest_optimize", {}) or {}
+    min_scores = _as_list(cfg.get("min_score_grid"), [0.58, 0.60, 0.62, 0.65, 0.68, 0.70])
+    topks = _as_list(cfg.get("topk_grid"), [1, 2, 3])
+    sell_ns = _as_list(cfg.get("sell_n_grid"), [2, 3, 5])
+    trailing_stops = _as_list(cfg.get("trailing_stop_grid"), [0.03, 0.04])
+    take_profits = _as_list(cfg.get("take_profit_grid"), [0.0, 0.08])
+    cooldowns = _as_list(cfg.get("cooldown_after_stop_grid"), [full_cfg.get("cooldown_after_stop", 5)])
+    min_sells = int(cfg.get("min_sells", 20))
+
+    rows = []
+    total = (
+        len(min_scores) * len(topks) * len(sell_ns) * len(trailing_stops)
+        * len(take_profits) * len(cooldowns)
+    )
+    logger.info(f"  optimize backtest grid: {total} combos")
+    for min_score in min_scores:
+        for topk in topks:
+            for sell_n in sell_ns:
+                for trailing_stop in trailing_stops:
+                    for take_profit in take_profits:
+                        for cooldown in cooldowns:
+                            params = {
+                                "min_score": float(min_score),
+                                "topk": int(topk),
+                                "sell_n": int(sell_n),
+                                "trailing_stop": float(trailing_stop),
+                                "take_profit": float(take_profit),
+                                "cooldown_after_stop": int(cooldown),
+                            }
+                            bt = _run_bt_with_params(signals, daily, full_cfg, params)
+                            metrics = dict(bt.get_metrics())
+                            trades = bt.get_trades()
+                            sells = trades[trades["action"].astype(str).str.startswith("SELL")] if len(trades) else pd.DataFrame()
+                            row = {**params, **metrics}
+                            row["num_sells"] = int(len(sells))
+                            if len(sells):
+                                row["sell_avg_return"] = float(sells["return_pct"].mean())
+                                row["sell_median_return"] = float(sells["return_pct"].median())
+                            rows.append(row)
+
+    grid_df = pd.DataFrame(rows)
+    if grid_df.empty:
+        return {}, grid_df
+
+    grid_df["sharpe_rank_value"] = grid_df["sharpe_ratio"].replace([np.inf, -np.inf], np.nan).fillna(-999.0)
+    eligible = grid_df[grid_df["num_sells"] >= min_sells].copy()
+    if eligible.empty:
+        eligible = grid_df.copy()
+        logger.warning(f"  no grid combo reached min_sells={min_sells}; selecting from all combos")
+    eligible = eligible.sort_values(
+        ["sharpe_rank_value", "total_return", "max_drawdown", "num_sells"],
+        ascending=[False, False, False, False],
+    )
+    best = eligible.iloc[0].to_dict()
+    best_params = {
+        "min_score": float(best["min_score"]),
+        "topk": int(best["topk"]),
+        "sell_n": int(best["sell_n"]),
+        "trailing_stop": float(best["trailing_stop"]),
+        "take_profit": float(best["take_profit"]),
+        "cooldown_after_stop": int(best["cooldown_after_stop"]),
+    }
+
+    grid_df = grid_df.sort_values(
+        ["sharpe_rank_value", "total_return", "max_drawdown"],
+        ascending=[False, False, False],
+    ).drop(columns=["sharpe_rank_value"])
+    _save_grid(arch, grid_df)
+    best_path = arch.run_dir / "best_backtest_params.json"
+    with open(best_path, "w", encoding="utf-8") as f:
+        json.dump(best_params, f, ensure_ascii=False, indent=2)
+    try:
+        arch._summary["artifacts"].append("best_backtest_params.json")
+    except Exception:
+        pass
+    logger.info(
+        "  best grid sharpe=%.2f return=%.2f%% drawdown=%.2f%% sells=%d"
+        % (
+            float(best.get("sharpe_ratio", np.nan)),
+            float(best.get("total_return", 0.0)) * 100,
+            float(best.get("max_drawdown", 0.0)) * 100,
+            int(best.get("num_sells", 0)),
+        )
+    )
+    return best_params, grid_df
+
+
 def main():
     cfg = get_config()
     event_cfg = cfg.get_section("event")
@@ -277,12 +410,15 @@ def main():
         "model_dir":          cfg.get("dataset.model_dir", "./models"),
         "model_params":       cfg.get_section("model").get("params", {}),
         "initial_cash":       bt_cfg.get("initial_cash", 10_000_000),
-        "topk":               5,
+        "topk":               bt_cfg.get("topk", 5),
         "sell_n":             bt_cfg.get("sell_n", 8),
         "slippage":           bt_cfg.get("slippage", 0.003),
         "min_score":          bt_cfg.get("min_score", 0.6),
+        "take_profit":        bt_cfg.get("take_profit", 0.0),
         "trailing_stop":      bt_cfg.get("trailing_stop", 0.0),
         "cooldown_after_stop": bt_cfg.get("cooldown_after_stop", 5),
+        "optimize_backtest":  bt_cfg.get("optimize", False),
+        "backtest_optimize":  bt_cfg.get("optimize_grid", {}),
         "bt_start":           bt_cfg.get("start_date"),
         "bt_end":             bt_cfg.get("end_date"),
     }
