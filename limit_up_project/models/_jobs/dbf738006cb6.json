@@ -1,0 +1,40 @@
+{
+  "id": "dbf738006cb6",
+  "kind": "train",
+  "state": "done",
+  "params": {
+    "start": "2022-01-01",
+    "end": "2024-12-31",
+    "train_end": "2023-12-31",
+    "valid_end": "2024-06-30",
+    "test_end": "2024-12-31",
+    "tdx_path": "C:\\new_tdx\\vipdoc",
+    "golden_lo": 0.15,
+    "golden_hi": 0.35,
+    "golden_horizon": 10,
+    "max_gap": 30,
+    "positive_window": 5,
+    "k_range": [
+      3,
+      8
+    ],
+    "k_fixed": null,
+    "bundle_type": "both",
+    "min_train_samples_per_cluster": 80,
+    "min_auc_test": 0.55,
+    "n_estimators": 200,
+    "out": "./models/pattern_cluster",
+    "save_training_data": true
+  },
+  "result": {
+    "returncode": 1,
+    "stdout_tail": "",
+    "stderr_tail": "2026-05-19 14:31:59 | INFO     | __main__:load_daily:102 - 加载日线数据 …\n2026-05-19 14:31:59 | INFO     | src.data.tdx_loader:__init__:97 - TDX data dir: C:\\new_tdx\\vipdoc\n2026-05-19 14:32:00 | INFO     | __main__:load_daily:110 - 加载 3261 只主板股票\n2026-05-19 14:32:42 | INFO     | __main__:main:633 - === Dry-run 数据诊断 ===\nTraceback (most recent call last):\n  File \"G:\\AI\\RiseQuant\\limit_up_project\\scripts\\wash_pattern_train.py\", line 688, in <module>\n    main()\n    ~~~~^^\n  File \"G:\\AI\\RiseQuant\\limit_up_project\\scripts\\wash_pattern_train.py\", line 642, in main\n    print(rep.pretty_print())\n    ~~~~~^^^^^^^^^^^^^^^^^^^^\nUnicodeEncodeError: 'gbk' codec can't encode character '\\u2705' in position 271: illegal multibyte sequence\n",
+    "bundle_dir": "G:\\AI\\RiseQuant\\limit_up_project\\models\\pattern_cluster\\run_20260515_174622"
+  },
+  "logs": [],
+  "error": null,
+  "created_at": "2026-05-19T14:31:52.725429",
+  "started_at": "2026-05-19T14:31:52.728016",
+  "finished_at": "2026-05-19T14:33:05.715388"
+}

@@ -1,0 +1,32 @@
+{
+  "id": "795f416e27f0",
+  "kind": "backtest",
+  "state": "done",
+  "params": {
+    "bundle_dir": "G:\\\\AI\\\\RiseQuant\\\\limit_up_project\\\\models\\\\pattern_cluster\\\\run_20260515_174622",
+    "bundle_type": "per_cluster",
+    "bt_start": "2024-01-01",
+    "bt_end": "2024-12-31",
+    "tdx_path": "C:\\new_tdx\\vipdoc",
+    "initial_cash": 10000000.0,
+    "topk": 5,
+    "sell_n": 8,
+    "slippage": 0.003,
+    "min_score": 0.6,
+    "min_score_per_cluster": null,
+    "cooldown": 5,
+    "clusters": null
+  },
+  "result": {
+    "returncode": 1,
+    "stdout_tail": "",
+    "stderr_tail": "2026-05-19 15:16:09 | INFO     | src.data.tdx_loader:__init__:97 - TDX data dir: C:\\new_tdx\\vipdoc\nTraceback (most recent call last):\n  File \"G:\\AI\\RiseQuant\\limit_up_project\\scripts\\wash_pattern_backtest.py\", line 379, in <module>\n    main()\n    ~~~~^^\n  File \"G:\\AI\\RiseQuant\\limit_up_project\\scripts\\wash_pattern_backtest.py\", line 338, in main\n    bundle = ModelBundle.load(bundle_paths[0], bundle_type=args.bundle_type)\n  File \"G:\\AI\\RiseQuant\\limit_up_project\\src\\model\\model_bundle.py\", line 271, in load\n    raise FileNotFoundError(f\"shared/ not found under {bundle_dir}\")\nFileNotFoundError: shared/ not found under G:\\AI\\RiseQuant\\limit_up_project\\models\\pattern_cluster\\run_20260515_174622\n",
+    "backtest_dir": null,
+    "metrics": null
+  },
+  "logs": [],
+  "error": null,
+  "created_at": "2026-05-19T15:16:04.389213",
+  "started_at": "2026-05-19T15:16:04.394843",
+  "finished_at": "2026-05-19T15:16:56.277590"
+}
