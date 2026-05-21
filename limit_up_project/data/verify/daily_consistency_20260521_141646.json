@@ -1,0 +1,72 @@
+{
+  "args": {
+    "start": "20200101",
+    "end": "20260521",
+    "daily_cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\daily_cache",
+    "zt_cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\zt_pool_cache",
+    "verify_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\verify",
+    "main_board_only": true,
+    "max_mismatch_rows": 200
+  },
+  "timestamp": "2026-05-21T14:17:10",
+  "coverage": {
+    "total_rows": 1025,
+    "missing": 24,
+    "coverage": 0.9766,
+    "threshold": 0.99,
+    "pass": false,
+    "missing_codes": 23
+  },
+  "price_consistency": {
+    "n_checked": 1001,
+    "price_mismatch": 2,
+    "price_mismatch_rate": 0.002,
+    "chg_out_of_band": 7,
+    "limit_up_rule_violation": 0,
+    "pass_price": true,
+    "pass_chg_band": false,
+    "pass_limit_up_rule": true,
+    "price_rel_tol": 0.01,
+    "chg_abs_tol_pp": 0.5
+  },
+  "time_tier": {
+    "n": 1025,
+    "tier_ok": 775,
+    "tier_ok_ratio": 0.7561,
+    "tier_distribution": {
+      "1": 79,
+      "2": 449,
+      "3": 247,
+      "5": 250
+    },
+    "threshold": 0.95,
+    "pass": false
+  },
+  "empty_runs": {
+    "empty_runs": [
+      {
+        "start": "20200101",
+        "end": "20260427",
+        "len": 1649
+      }
+    ],
+    "max_run": 1649,
+    "threshold": 5,
+    "warn": true
+  },
+  "lookahead": {
+    "ok": true
+  },
+  "overall_pass": false,
+  "daily_cache_summary": {
+    "cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\daily_cache",
+    "count": 683,
+    "non_empty": 683,
+    "empty": 0,
+    "total_size_mb": 46.484,
+    "sampled_rows": 77532,
+    "earliest_date": "2020-01-02",
+    "latest_date": "2026-05-20",
+    "sampled_files": 53
+  }
+}

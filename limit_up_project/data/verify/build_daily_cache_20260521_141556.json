@@ -1,0 +1,41 @@
+{
+  "args": {
+    "start": "20200101",
+    "end": "20260521",
+    "universe": "zt_pool_relevant",
+    "source": "auto",
+    "tdx_path": "C:\\new_tdx\\vipdoc",
+    "cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\daily_cache",
+    "zt_cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\zt_pool_cache",
+    "force_refresh": false,
+    "no_fallback": false,
+    "max_codes": 0,
+    "report_json": "G:\\AI\\RiseQuant\\limit_up_project\\data\\verify\\build_daily_cache_20260521_141556.json"
+  },
+  "summary": {
+    "total": 683,
+    "by_status": {
+      "ok": 683
+    },
+    "rows_added": 996003,
+    "elapsed_sec_sum": 30.8,
+    "by_source": {
+      "primary": 683
+    },
+    "errors_head": [],
+    "errors_total": 0
+  },
+  "cache_after": {
+    "cache_dir": "G:\\AI\\RiseQuant\\limit_up_project\\data\\daily_cache",
+    "count": 683,
+    "non_empty": 683,
+    "empty": 0,
+    "total_size_mb": 46.484,
+    "sampled_rows": 77532,
+    "earliest_date": "2020-01-02",
+    "latest_date": "2026-05-20",
+    "sampled_files": 53
+  },
+  "elapsed_sec": 30.843383,
+  "timestamp": "2026-05-21T14:16:34"
+}
