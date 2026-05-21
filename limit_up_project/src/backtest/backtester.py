@@ -113,6 +113,7 @@ class Backtester:
         slippage: float = 0.003,
         commission: float = 0.0,
         entry_delay: int = 1,
+        entry_price: str = "open",
         # ---- 风控扩展 ----
         stop_loss: float = 0.0,        # 硬止损, 例如 0.03 表示 -3% 立即出场
         take_profit: float = 0.0,      # 硬止盈, 例如 0.10 表示 +10% 兑现
@@ -126,6 +127,9 @@ class Backtester:
         self.sell_n = int(sell_n)
         self.slippage = float(slippage)
         self.commission = float(commission)
+        if entry_price not in ("open", "close"):
+            raise ValueError("entry_price must be 'open' or 'close'")
+        self.entry_price = entry_price
         self.stop_loss = float(stop_loss)
         self.take_profit = float(take_profit)
         self.trailing_stop = float(trailing_stop)
@@ -357,8 +361,8 @@ class Backtester:
             if (current_date, code) not in daily_idx.index:
                 continue
             row = daily_idx.loc[(current_date, code)]
-            open_price = float(row["open"])
-            if open_price <= 0:
+            raw_entry_price = float(row[self.entry_price])
+            if raw_entry_price <= 0:
                 continue
 
             # 一字/秒板涨停: 实盘买不进
@@ -367,12 +371,12 @@ class Backtester:
                 if (signal_date, code) in daily_idx.index:
                     ref_close = float(daily_idx.loc[(signal_date, code), "close"])
                     if ref_close > 0:
-                        gap_pct = open_price / ref_close - 1.0
+                        gap_pct = raw_entry_price / ref_close - 1.0
                         if gap_pct >= 0.095:
                             continue
 
-            slip_amount = open_price * self.slippage
-            buy_price = open_price + slip_amount
+            slip_amount = raw_entry_price * self.slippage
+            buy_price = raw_entry_price + slip_amount
             if buy_price <= 0:
                 continue
             shares = budget_per / buy_price

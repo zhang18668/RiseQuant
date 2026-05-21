@@ -29,14 +29,13 @@
 
 - 入口：`scripts/verify_daily_cache.py`
 - 产物：`data/verify/daily_consistency_<ts>.json/md`，必要时输出 mismatch CSV。
-- 校验项：覆盖率、价格一致性、涨跌幅越界、涨停规则、时间分档、防未来函数自检。
 - 状态：代码完成。
 
 ### T-005 核心建模流水线
 
 - 入口：`scripts/run_pipeline.py`
 - 内容：TDX 日线加载、事件检测、特征计算、时间切分、LightGBM 训练、T+1 回测。
-- 状态：已实现，可作为原始 baseline。
+- 状态：已实现。
 
 ### T-006 策略实验流水线
 
@@ -59,30 +58,32 @@
 ### T-009 Harness 文档五件套
 
 - 文件：`PROJECT_MAP.md`、`ARCHITECTURE.md`、`TASKS.md`、`DECISIONS.md`、`RUNBOOK.md`
-- 状态：本次已补齐。
+- 状态：已补齐。
 
-## 进行中
+### T-101 主 pipeline 优先读取 `DailyCacheManager`
 
-### T-101 让主 pipeline 优先读取 `DailyCacheManager`
-
-- 背景：`scripts/run_pipeline.py` 当前仍直接 `TDXDataLoader.load_batch()`。
-- 目标：优先从 `data/daily_cache/<code>.parquet` 读取，缺失时提示先构建缓存或走 fallback。
-- 价值：训练启动更快，减少重复读取 TDX 文件。
-- 建议优先级：高。
+- 入口：`scripts/run_pipeline.py --source {cache,tdx,auto}`
+- 核心：`src/data/pipeline_loader.py`
+- 行为：默认 `cache` 仅读 `data/daily_cache`；`auto` 先读缓存，失败后回退 TDX；`tdx` 保留原直读通达信路径。
+- 测试：`tests/test_data/test_pipeline_loader.py`
+- 状态：已完成。
 
 ### T-102 收敛脚本参数和产物 schema
 
-- 背景：多条策略脚本参数命名、产物字段存在差异。
-- 目标：统一 `config.json`、`summary.json`、`signals.csv`、`trades.csv`、`equity_curve.csv`、`backtest_metrics.json` 的最低字段。
-- 价值：前端和 API bundle 查询更稳。
-- 建议优先级：高。
+- 核心：`src/utils/artifact_schema.py`
+- 行为：训练 bundle、pattern 回测、通用 `RunArchive` 都写 `manifest.json`。
+- API：`api/routers/bundles.py` 已在 bundle/backtest 列表与详情中返回 `manifest`，老产物缺 manifest 时仍兼容。
+- 测试：`tests/test_utils/test_artifact_schema.py`、`tests/test_utils/test_run_archive_manifest.py`、`tests/test_model/test_model_bundle.py`
+- 状态：已完成。
 
 ### T-103 API job 日志增强
 
-- 背景：当前 subprocess 只保留 stdout/stderr 尾部。
-- 目标：把脚本完整日志路径写入 job result，或实时追加到 job logs。
-- 价值：失败排查更快。
-- 建议优先级：中。
+- 核心：`api/jobs.py`、`api/runner.py`
+- 行为：每个 job 创建 `models/_jobs/<job_id>.log`；`GET /api/jobs/{id}` 动态从日志文件回填 tail。
+- subprocess：训练/回测脚本的完整 stdout/stderr 合并写入同一个 job log。
+- API/UI：job payload 增加 `log_path`，前端 `JobWatcher` 展示完整日志路径。
+- 测试：`tests/test_api/test_jobs_logging.py`、`tests/test_api/test_runner_logging.py`
+- 状态：已完成。
 
 ## 下一步候选
 
@@ -120,7 +121,7 @@
 
 ## 已知风险
 
-- TDX 路径硬编码默认 `C:\new_tdx\vipdoc`，换机器时容易失败。
+- TDX 路径默认 `C:\new_tdx\vipdoc`，换机器时容易失败。
 - API CORS 开发期全开放，生产前必须收窄。
 - 当前 git 工作区含大量数据缓存和 `__pycache__`，后续提交前要谨慎筛选。
 - 多条策略 pipeline 并存，短期灵活，长期需要统一产物契约。

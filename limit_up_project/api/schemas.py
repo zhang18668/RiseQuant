@@ -106,3 +106,4 @@ class JobView(BaseModel):
     result: Optional[Dict] = None
     error: Optional[Dict] = None
     logs: List[str] = []
+    log_path: Optional[str] = None

@@ -38,6 +38,8 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from src.utils.artifact_schema import write_backtest_manifest
+
 
 def _json_default(o: Any):
     """让 json.dump 能吃 datetime / Timestamp / numpy 标量."""
@@ -166,6 +168,14 @@ class RunArchive:
         p = self.run_dir / "summary.json"
         with open(p, "w", encoding="utf-8") as f:
             json.dump(self._summary, f, ensure_ascii=False, indent=2, default=_json_default)
+        write_backtest_manifest(
+            self.run_dir,
+            strategy=self.strategy,
+            run_id=self.run_id,
+            metrics=self._summary.get("backtest_metrics", {}),
+            config=self._summary.get("config", {}),
+            extra={"summary": self._summary},
+        )
         # 同步到 latest/summary.json
         try:
             shutil.copy2(p, self.latest_dir / "summary.json")

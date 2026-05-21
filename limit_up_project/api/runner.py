@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -19,6 +20,49 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
+JOBS_DIR = ROOT / "models" / "_jobs"
+
+
+def _tail_text(path: Path, limit: int = 2000) -> str:
+    if not path.exists():
+        return ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return text[-limit:]
+
+
+def _subprocess_log_path(kind: str) -> Path:
+    env_path = os.environ.get("RISEQUANT_JOB_LOG_PATH")
+    if env_path:
+        return Path(env_path)
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return JOBS_DIR / f"{kind}_{ts}.log"
+
+
+def _run_subprocess(cmd: List[str], env: Dict[str, str], kind: str) -> Dict[str, Any]:
+    """Run a subprocess and stream its full output into the current job log."""
+    log_path = _subprocess_log_path(kind)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", errors="replace") as log:
+        log.write("\n" + "=" * 80 + "\n")
+        log.write(f"[{datetime.now().isoformat(timespec='seconds')}] subprocess start\n")
+        log.write("cwd: " + str(ROOT) + "\n")
+        log.write("cmd: " + " ".join(cmd) + "\n")
+        log.flush()
+        proc = subprocess.run(
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            cwd=str(ROOT),
+        )
+        log.write(f"\n[{datetime.now().isoformat(timespec='seconds')}] subprocess exit {proc.returncode}\n")
+    return {
+        "returncode": proc.returncode,
+        "log_path": str(log_path),
+        "output_tail": _tail_text(log_path),
+    }
 
 
 # ============================================================
@@ -138,7 +182,7 @@ def run_train_via_script(req: Dict[str, Any]) -> Dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
     logger.info("running: " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    proc_info = _run_subprocess(cmd, env, kind="train")
     # discover newest run dir in --out
     out_root = Path(req.get("out", "./models/pattern_cluster"))
     bundle_dir = None
@@ -152,9 +196,9 @@ def run_train_via_script(req: Dict[str, Any]) -> Dict[str, Any]:
             if subs:
                 bundle_dir = str(subs[0].resolve())
     return {
-        "returncode": proc.returncode,
-        "stdout_tail": proc.stdout[-2000:],
-        "stderr_tail": proc.stderr[-2000:],
+        "returncode": proc_info["returncode"],
+        "log_path": proc_info["log_path"],
+        "output_tail": proc_info["output_tail"],
         "bundle_dir": bundle_dir,
     }
 
@@ -180,7 +224,7 @@ def run_backtest_via_script(req: Dict[str, Any]) -> Dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(ROOT)
     logger.info("running: " + " ".join(cmd))
-    proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=str(ROOT))
+    proc_info = _run_subprocess(cmd, env, kind="backtest")
     # find latest backtest run
     backtests_root = ROOT / "backtests"
     bt_dir = None
@@ -199,9 +243,9 @@ def run_backtest_via_script(req: Dict[str, Any]) -> Dict[str, Any]:
             except Exception:
                 metrics = None
     return {
-        "returncode": proc.returncode,
-        "stdout_tail": proc.stdout[-2000:],
-        "stderr_tail": proc.stderr[-2000:],
+        "returncode": proc_info["returncode"],
+        "log_path": proc_info["log_path"],
+        "output_tail": proc_info["output_tail"],
         "backtest_dir": bt_dir,
         "metrics": metrics,
     }

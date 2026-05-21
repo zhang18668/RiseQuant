@@ -39,6 +39,7 @@ import pandas as pd
 
 from src.model.model_trainer import LimitUpModelTrainer
 from src.pattern.pattern_router import PatternRouter
+from src.utils.artifact_schema import write_training_manifest
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -224,6 +225,18 @@ class BundleArchive:
     def save_training_summary(self, summary: Dict[str, Any]) -> None:
         with open(self.run_dir / "training_summary.json", "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2, default=_json_default)
+        bundle_types = []
+        if (self.run_dir / "bundle_per_cluster").exists():
+            bundle_types.append("per_cluster")
+        if (self.run_dir / "bundle_single_with_cf").exists():
+            bundle_types.append("single_with_cf")
+        write_training_manifest(
+            self.run_dir,
+            strategy=self.bundle_name or "pattern_cluster",
+            run_id=str(self.run_id),
+            bundle_types=bundle_types,
+            summary=summary,
+        )
 
     # ------------------------------------------------------------------
     # latest symlink/copy

@@ -7,6 +7,9 @@
     <div v-if="job.error" style="color: #c00; margin-bottom: 8px;">
       <b>{{ job.error.type }}:</b> {{ job.error.msg }}
     </div>
+    <div v-if="job.log_path" class="log-path">
+      log: {{ job.log_path }}
+    </div>
     <el-collapse v-if="job.result">
       <el-collapse-item title="result">
         <pre>{{ JSON.stringify(job.result, null, 2) }}</pre>
@@ -60,6 +63,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 .watcher { margin-top: 16px; }
+.log-path { color: #666; font-size: 12px; margin-bottom: 8px; word-break: break-all; }
 .logs { background: #1e1e1e; color: #e0e0e0; padding: 8px; max-height: 300px; overflow: auto; font-size: 12px; }
 pre { margin: 0; }
 </style>

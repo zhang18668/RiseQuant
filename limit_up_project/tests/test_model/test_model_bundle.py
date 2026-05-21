@@ -150,7 +150,15 @@ def test_save_training_summary(tmp_path):
     arch.save_training_summary({"hello": "world", "n": 5})
     p = arch.run_dir / "training_summary.json"
     assert p.exists()
+    manifest = arch.run_dir / "manifest.json"
+    assert manifest.exists()
     import json
     with open(p) as f:
         d = json.load(f)
     assert d["hello"] == "world"
+    with open(manifest) as f:
+        m = json.load(f)
+    assert m["schema_version"] == "artifact-manifest/v1"
+    assert m["artifact_type"] == "training_bundle"
+    assert m["strategy"] == "s"
+    assert m["summary"]["hello"] == "world"

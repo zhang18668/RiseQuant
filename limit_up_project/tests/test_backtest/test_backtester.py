@@ -70,6 +70,40 @@ class TestBacktester:
         assert "date" in result.columns
         assert "total_value" in result.columns
 
+    def test_same_day_close_entry_price(self):
+        """Signal-day close execution for tail-buy simulations."""
+        bt = Backtester(
+            initial_cash=100000,
+            topk=1,
+            sell_n=1,
+            slippage=0.0,
+            entry_delay=0,
+            entry_price="close",
+            skip_zhangting_open=False,
+        )
+        dates = pd.date_range("2024-01-02", periods=3, freq="B")
+        signals = pd.DataFrame({
+            "date": [dates[0]],
+            "code": ["600000"],
+            "score": [1.0],
+        })
+        daily = pd.DataFrame({
+            "date": list(dates),
+            "code": ["600000"] * 3,
+            "open": [10.0, 11.0, 12.0],
+            "high": [11.0, 12.0, 13.0],
+            "low": [9.5, 10.5, 11.5],
+            "close": [10.8, 11.5, 12.5],
+            "volume": [1000, 1000, 1000],
+        })
+
+        bt.run(signals, daily)
+        trades = bt.get_trades()
+
+        buy = trades[trades["action"] == "BUY"].iloc[0]
+        assert buy["date"] == "2024-01-02"
+        assert buy["price"] == 10.8
+
 
 class TestTrade:
     """交易记录测试"""

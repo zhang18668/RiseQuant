@@ -37,6 +37,11 @@ def list_bundles(base: str = "./models/pattern_cluster"):
     for bd in _list_bundle_dirs(base_p):
         with open(bd / "shared" / "shared_meta.json", encoding="utf-8") as f:
             meta = json.load(f)
+        manifest_path = bd / "manifest.json"
+        manifest = None
+        if manifest_path.exists():
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
         ts_path = bd / "training_summary.json"
         summary = None
         if ts_path.exists():
@@ -45,6 +50,7 @@ def list_bundles(base: str = "./models/pattern_cluster"):
         out.append({
             "bundle_dir": str(bd),
             "name": bd.name,
+            "manifest": manifest,
             "meta": meta,
             "training_summary": summary,
             "has_per_cluster": (bd / "bundle_per_cluster").exists(),
@@ -60,6 +66,10 @@ def bundle_detail(bundle_dir: str):
     if not bd.exists():
         raise HTTPException(404, f"bundle not found: {bundle_dir}")
     out: Dict[str, Any] = {"bundle_dir": str(bd)}
+    mf = bd / "manifest.json"
+    if mf.exists():
+        with open(mf, encoding="utf-8") as f:
+            out["manifest"] = json.load(f)
     sm = bd / "shared" / "shared_meta.json"
     if sm.exists():
         with open(sm, encoding="utf-8") as f:
@@ -131,6 +141,10 @@ def list_backtests(base: str = "./backtests"):
                 continue
             entry: Dict[str, Any] = {"run_dir": str(run), "name": run.name,
                                       "modified_at": run.stat().st_mtime}
+            mf = run / "manifest.json"
+            if mf.exists():
+                with open(mf, encoding="utf-8") as f:
+                    entry["manifest"] = json.load(f)
             mp = run / "backtest_metrics.json"
             if mp.exists():
                 with open(mp, encoding="utf-8") as f:
@@ -149,7 +163,7 @@ def backtest_detail(run_dir: str):
     if not p.exists():
         raise HTTPException(404, "run not found")
     out: Dict[str, Any] = {"run_dir": str(p)}
-    for fname in ["backtest_metrics.json", "summary.json", "run_config.json"]:
+    for fname in ["manifest.json", "backtest_metrics.json", "summary.json", "run_config.json"]:
         f = p / fname
         if f.exists():
             with open(f, encoding="utf-8") as g:

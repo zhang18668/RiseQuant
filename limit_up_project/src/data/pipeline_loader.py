@@ -1,49 +1,74 @@
-"""D-008 PipelineDataLoader — 给 run_pipeline / wash_*_pipeline 用的统一加载入口
+"""Pipeline daily-data loader.
 
-把"从 daily_cache / TDX / AkShare 之间选择最合适来源"的逻辑集中到一处，
-避免每个流水线脚本重复一遍。
+This module centralizes the source selection used by top-level pipelines:
 
-source 语义
------------
-- ``cache`` (默认)：仅从 ``data/daily_cache/`` 读 parquet；缺失则 raise 并引导。
-- ``tdx``：直接调 ``TDXDataLoader.load_batch``（老行为，全市场主板）。
-- ``auto``：cache 优先；为空时回退到 ``tdx``。
+- ``cache``: read only ``data/daily_cache/*.parquet`` and fail with guidance if
+  the cache is missing or empty.
+- ``tdx``: read directly from local TDX ``vipdoc`` files.
+- ``auto``: try cache first, then fall back to TDX.
 
-universe 选择
--------------
-- 优先从 ``data/zt_pool_cache/`` 抽（与 ``scripts/build_daily_cache.py`` 一致）。
-- zt_pool 为空时回退到 daily_cache 目录扫描。
+The cache universe is resolved the same way as ``build_daily_cache.py``:
+prefer the landed zt-pool cache, then fall back to scanning existing daily
+cache files.
 """
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List
 
 import pandas as pd
+from dateutil.relativedelta import relativedelta
 
 from src.data.daily_cache import DailyCacheManager
-from src.data.zt_pool_loader import ZtPoolLoader
 from src.data.tdx_loader import TDXDataLoader
+from src.data.zt_pool_loader import ZtPoolLoader
 from src.data_fetch.base import DataFetcher
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 
+class _ReadOnlyFetcher(DataFetcher):
+    """Dummy fetcher for a DailyCacheManager that is only used for reads."""
+
+    def load_stock_list(self, exchange: str = "sh") -> pd.DataFrame:
+        return pd.DataFrame(columns=["code", "market"])
+
+    def load_batch(
+        self,
+        codes: Iterable[str],
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> pd.DataFrame:
+        return pd.DataFrame()
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_path(raw: str | Path, root: Path) -> Path:
+    path = Path(raw)
+    return path if path.is_absolute() else root / path
+
+
+def _history_start(start_date: str) -> str:
+    return (pd.Timestamp(start_date) - relativedelta(months=3)).strftime("%Y-%m-%d")
+
+
 def resolve_universe_for_cache(
-    zt_cache_dir: Path,
-    daily_cache_dir: Path,
+    zt_cache_dir: str | Path,
+    daily_cache_dir: str | Path,
     start_date: str,
     end_date: str,
 ) -> List[str]:
-    """决定 cache-first 模式下要读哪些 code。
+    """Resolve the list of codes to read in cache mode."""
+    zt_cache_dir = Path(zt_cache_dir)
+    daily_cache_dir = Path(daily_cache_dir)
 
-    优先从 zt_pool 缓存抽 universe（与 build_daily_cache 一致）；
-    若 zt_pool 缓存空，则从 daily_cache 目录现存 parquet 列出代码。
-    """
     if zt_cache_dir.exists():
         try:
-            zt_loader = ZtPoolLoader(cache_dir=str(zt_cache_dir), require_akshare=False)
+            zt_loader = ZtPoolLoader(cache_dir=zt_cache_dir, require_akshare=False)
             codes = DailyCacheManager.universe_from_zt_pool(
                 zt_loader=zt_loader,
                 start_date=str(start_date).replace("-", ""),
@@ -51,146 +76,140 @@ def resolve_universe_for_cache(
                 main_board_only=True,
             )
             if codes:
-                logger.info(f"universe 来自 zt_pool 缓存: {len(codes)} 只")
+                logger.info("Universe from zt_pool cache: %s codes", len(codes))
                 return codes
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"读 zt_pool 缓存失败：{exc}; 回退到目录扫描")
+            logger.warning(
+                "Failed to resolve universe from zt_pool cache (%s); "
+                "falling back to daily_cache scan.",
+                exc,
+            )
 
     if daily_cache_dir.exists():
         codes = sorted(p.stem for p in daily_cache_dir.glob("*.parquet"))
         if codes:
-            logger.info(f"universe 来自 daily_cache 目录扫描: {len(codes)} 只")
+            logger.info("Universe from daily_cache scan: %s codes", len(codes))
             return codes
 
     return []
 
 
-def _make_readonly_cache_mgr(cache_dir: Path) -> DailyCacheManager:
-    """只读 DailyCacheManager（用 dummy fetcher，不会发起请求）。"""
-
-    class _DummyFetcher(DataFetcher):
-        def load_stock_list(self, exchange: str = "sh") -> pd.DataFrame:
-            return pd.DataFrame(columns=["code", "market"])
-
-        def load_batch(self, codes, start_date=None, end_date=None) -> pd.DataFrame:
-            return pd.DataFrame()
-
+def _make_readonly_cache_mgr(cache_dir: str | Path) -> DailyCacheManager:
     return DailyCacheManager(
         cache_dir=cache_dir,
-        primary_fetcher=_DummyFetcher(),
+        primary_fetcher=_ReadOnlyFetcher(),
         fallback_fetcher=None,
     )
 
 
+def _load_from_cache(
+    daily_cache_dir: Path,
+    zt_cache_dir: Path,
+    start_date: str,
+    end_date: str,
+) -> pd.DataFrame:
+    codes = resolve_universe_for_cache(
+        zt_cache_dir=zt_cache_dir,
+        daily_cache_dir=daily_cache_dir,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not codes:
+        raise RuntimeError(
+            "Unable to resolve cache universe. Run build_zt_pool_cache.py and "
+            "build_daily_cache.py first, or use --source tdx/auto."
+        )
+
+    mgr = _make_readonly_cache_mgr(daily_cache_dir)
+    data = mgr.load_range(
+        codes,
+        start_date=_history_start(start_date),
+        end_date=end_date,
+    )
+    if data.empty:
+        raise RuntimeError(
+            f"daily_cache matched {len(codes)} codes but returned no rows from "
+            f"{daily_cache_dir}. Rebuild the cache or use --source tdx/auto."
+        )
+    return data
+
+
+def _load_from_tdx(tdx_path: str | Path, start_date: str, end_date: str) -> pd.DataFrame:
+    loader = TDXDataLoader(str(tdx_path))
+    if loader.data_path is None:
+        raise RuntimeError(
+            f"TDX vipdoc path not found: {tdx_path}. Update data.tdx_vipdoc "
+            "or run with --source cache after building daily_cache."
+        )
+
+    codes: List[str] = []
+    for exchange in ("sh", "sz"):
+        stock_list = loader.load_stock_list(exchange)
+        if stock_list is None or stock_list.empty:
+            continue
+        codes.extend(
+            str(code).zfill(6)
+            for code in stock_list["code"].tolist()
+            if loader.is_main_board(code)
+        )
+
+    if not codes:
+        raise RuntimeError(f"No main-board codes found from TDX path: {tdx_path}")
+
+    data = loader.load_batch(
+        codes=codes,
+        start_date=_history_start(start_date),
+        end_date=end_date,
+    )
+    if data.empty:
+        raise RuntimeError(f"TDX returned no daily rows from {tdx_path}")
+    return data
+
+
 def load_daily_data(config, source: str = "cache") -> pd.DataFrame:
-    """加载日线数据，支持 cache / tdx / auto 三种来源策略。
+    """Load daily bars for pipelines using cache, TDX, or cache-then-TDX."""
+    source = (source or "cache").lower()
+    if source not in {"cache", "tdx", "auto"}:
+        raise ValueError("source must be one of: cache, tdx, auto")
 
-    Parameters
-    ----------
-    config : Config
-        ``src.utils.config.get_config()`` 返回的对象，至少需要 ``data`` section。
-    source : str
-        参见模块 docstring。
-
-    Returns
-    -------
-    pd.DataFrame
-        date | code | open | high | low | close | volume | turnover | change_pct
-    """
     data_config = config.get_section("data")
     start_date = data_config.get("start_date", "2020-01-01")
     end_date = data_config.get("end_date", "2026-12-31")
 
-    from dateutil.relativedelta import relativedelta
-    history_start = (
-        pd.Timestamp(start_date) - relativedelta(months=3)
-    ).strftime("%Y-%m-%d")
+    root = _project_root()
+    daily_cache_dir = _resolve_path(
+        data_config.get("daily_cache_dir", "./data/daily_cache"),
+        root,
+    )
+    zt_cache_dir = _resolve_path(
+        data_config.get("zt_pool_cache_dir", "./data/zt_pool_cache"),
+        root,
+    )
+    tdx_path = Path(data_config.get("tdx_vipdoc", r"C:\new_tdx\vipdoc"))
+
     logger.info(
-        f"数据加载范围: {start_date} ~ {end_date} (含预读窗 {history_start})"
+        "Daily data window: %s ~ %s (history start: %s)",
+        start_date,
+        end_date,
+        _history_start(start_date),
     )
 
-    project_root = Path(__file__).resolve().parent.parent.parent
-    daily_cache_dir = Path(
-        data_config.get("daily_cache_dir",
-                        str(project_root / "data" / "daily_cache"))
-    )
-    zt_cache_dir = Path(
-        data_config.get("zt_pool_cache_dir",
-                        str(project_root / "data" / "zt_pool_cache"))
-    )
-    tdx_path = data_config.get("tdx_vipdoc", r"C:\new_tdx\vipdoc")
-
-    # -------------- cache / auto --------------
-    if source in ("cache", "auto"):
-        logger.info(f"[Step 0] 数据源: source={source}, dir={daily_cache_dir}")
-        cache_ok = daily_cache_dir.exists() and any(daily_cache_dir.glob("*.parquet"))
-        if not cache_ok:
-            msg = (
-                f"daily_cache 为空: {daily_cache_dir}\n"
-                f"  请先运行: python scripts/build_daily_cache.py\n"
-                f"  或改用 --source tdx 直接读通达信本地数据"
+    if source in {"cache", "auto"}:
+        try:
+            logger.info("Loading daily data from cache: %s", daily_cache_dir)
+            data = _load_from_cache(daily_cache_dir, zt_cache_dir, start_date, end_date)
+            logger.info(
+                "daily_cache hit: %s rows x %s codes",
+                len(data),
+                data["code"].nunique(),
             )
+            return data
+        except RuntimeError as exc:
             if source == "cache":
-                raise RuntimeError(msg)
-            logger.warning(msg + "\n  → 自动回退到 TDX")
-        else:
-            codes = resolve_universe_for_cache(
-                zt_cache_dir, daily_cache_dir, start_date, end_date
-            )
-            if not codes:
-                if source == "cache":
-                    raise RuntimeError(
-                        "未能确定 universe（zt_pool / daily_cache 都空）。"
-                        "请先运行 build_zt_pool_cache.py + build_daily_cache.py"
-                    )
-                logger.warning("universe 为空，回退到 TDX 全市场加载")
-            else:
-                mgr = _make_readonly_cache_mgr(daily_cache_dir)
-                daily_data = mgr.load_range(
-                    codes, start_date=history_start, end_date=end_date
-                )
-                if daily_data.empty:
-                    if source == "cache":
-                        raise RuntimeError(
-                            f"daily_cache 命中 {len(codes)} 只代码但读出空表。"
-                            f"请检查缓存或重新运行 build_daily_cache.py"
-                        )
-                    logger.warning("daily_cache 读出空表，回退到 TDX")
-                else:
-                    logger.info(
-                        f"daily_cache 命中: {len(daily_data)} 条日线 × "
-                        f"{daily_data['code'].nunique()} 只代码"
-                    )
-                    return daily_data
+                raise
+            logger.warning("Cache load failed; falling back to TDX. Reason: %s", exc)
 
-    # -------------- tdx / auto fallback --------------
-    logger.info(f"[Step 0] 数据源: TDX 本地 ({tdx_path})")
-    tdx_loader = TDXDataLoader(tdx_path)
-    if tdx_loader.data_path is None:
-        raise RuntimeError(
-            f"未找到通达信数据目录: {tdx_path}\n"
-            f"  检查 config/default.yaml 的 data.tdx_vipdoc 或环境变量 TDX_PATH"
-        )
-
-    main_codes: List[str] = []
-    for ex in ("sh", "sz"):
-        lst = tdx_loader.load_stock_list(ex)
-        if lst is None or lst.empty:
-            continue
-        for c in lst["code"].tolist():
-            if tdx_loader.is_main_board(c):
-                main_codes.append(c)
-    logger.info(f"TDX 主板代码数: {len(main_codes)}")
-
-    daily_data = tdx_loader.load_batch(
-        codes=main_codes,
-        start_date=history_start,
-        end_date=end_date,
-    )
-    if daily_data.empty:
-        raise RuntimeError("TDX 加载结果为空")
-    logger.info(
-        f"TDX 加载: {len(daily_data)} 条日线 × "
-        f"{daily_data['code'].nunique()} 只代码"
-    )
-    return daily_data
+    logger.info("Loading daily data from TDX: %s", tdx_path)
+    data = _load_from_tdx(tdx_path, start_date, end_date)
+    logger.info("TDX load complete: %s rows x %s codes", len(data), data["code"].nunique())
+    return data

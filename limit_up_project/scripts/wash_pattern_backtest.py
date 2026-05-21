@@ -40,6 +40,7 @@ from src.feature.wash_features import WashFeatures
 from src.model.model_bundle import ModelBundle
 from src.pattern.pattern_router import PatternRouter
 from src.pattern.sequence_extractor import SequenceExtractor
+from src.utils.artifact_schema import write_backtest_manifest
 from src.utils.logger import get_logger, setup_logger
 
 setup_logger(log_level="INFO")
@@ -294,6 +295,14 @@ def write_backtest_artifacts(
     }
     with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
+    write_backtest_manifest(
+        out_dir,
+        strategy="pattern_cluster",
+        run_id=str(run_cfg.get("run_id") or out_dir.name),
+        bundle_type=run_cfg.get("bundle_type"),
+        metrics=metrics,
+        config=run_cfg,
+    )
     logger.info("=" * 50)
     logger.info(f"总收益率 : {metrics.get('total_return', 0):.2%}")
     logger.info(f"年化收益 : {metrics.get('annual_return', 0):.2%}")
