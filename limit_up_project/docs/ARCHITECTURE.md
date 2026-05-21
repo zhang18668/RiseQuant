@@ -120,11 +120,13 @@ limit_up_project/
 
 ### 4.2 data — 加载层
 
-| 文件 | 职责 |
-|---|---|
-| `tdx_loader.py` | 通达信本地 `.day` 二进制日线读取。每条 32 字节 (`<IIIIIfII`)，价格除以 100，自动算 `change_pct` |
-| `akshare_loader.py` | AKShare 在线行情接口的薄包装 |
-| `cache_manager.py` | 缓存（parquet）层，复用上次抓取结果 |
+| 文件 | 代号 | 职责 |
+|---|---|---|
+| `tdx_loader.py` | D-001 | 通达信本地 `.day` 二进制日线读取。每条 32 字节 (`<IIIIIfII`)，价格除以 100，自动算 `change_pct` |
+| `akshare_loader.py` | D-002 | AKShare 在线行情接口的薄包装 |
+| `cache_manager.py` | D-003 | 通用 parquet 缓存层（基于哈希 key） |
+| `zt_pool_loader.py` | D-006 | 涨停板池（AkShare `stock_zt_pool_em` / `_previous_em`）：单日拉取、Parquet 缓存、enrich (主板、分档、封板强度) |
+| `daily_cache.py` | D-007 | 按 code 维度的日线 Parquet 缓存：universe 提取、增量更新、批量加载、主源/兜底 fetcher 切换。对应阶段 1.3，由 `scripts/build_daily_cache.py` 驱动，`scripts/verify_daily_cache.py` 校验 |
 
 加载层产出的统一 schema：
 

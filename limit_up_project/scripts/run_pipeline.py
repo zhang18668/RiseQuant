@@ -45,7 +45,7 @@ from src.model.model_registry import ModelRegistry
 from src.backtest.backtester import Backtester
 
 # 数据加载
-from src.data.tdx_loader import TDXDataLoader, load_tdx_data
+from src.data.pipeline_loader import load_daily_data
 
 # 防未来函数校验器 + 运行档案
 from src.utils.validator import LookAheadValidator
@@ -54,77 +54,6 @@ from src.utils.run_archive import RunArchive
 # 设置日志
 setup_logger(log_level="INFO")
 logger = get_logger(__name__)
-
-
-def generate_sample_data(
-    n_stocks: int = 100,
-    n_days: int = 500,
-    start_date: str = "2022-01-01",
-) -> pd.DataFrame:
-    """
-    生成模拟日线数据（用于演示）
-
-    实际使用时替换为真实数据
-
-    Args:
-        n_stocks: 股票数量
-        n_days: 交易日天数
-        start_date: 起始日期
-
-    Returns:
-        pd.DataFrame: 模拟日线数据
-    """
-    np.random.seed(42)
-
-    dates = pd.date_range(start=start_date, periods=n_days, freq="B")
-    codes = [f"{i:06d}" for i in range(n_stocks)]
-
-    records = []
-
-    for code in codes:
-        # 初始化价格
-        price = np.random.uniform(10, 100)
-        prices = [price]
-        volumes = [np.random.uniform(1e6, 1e8)]
-
-        # 生成随机游走价格
-        for i in range(1, n_days):
-            # 偶尔加入涨停
-            if np.random.random() < 0.01 and i > 20:  # 约1%概率涨停
-                change_pct = np.random.uniform(9.9, 10.0)
-            else:
-                change_pct = np.random.normal(0, 2)
-
-            price = price * (1 + change_pct / 100)
-            volume = np.random.uniform(1e6, 1e8)
-
-            prices.append(price)
-            volumes.append(volume)
-
-        # 生成每日数据
-        open_prices = [p * np.random.uniform(0.95, 1.0) for p in prices]
-        high_prices = [p * np.random.uniform(1.0, 1.05) for p in prices]
-        low_prices = [p * np.random.uniform(0.95, 1.0) for p in prices]
-
-        for i, date in enumerate(dates):
-            change_pct = (prices[i] / prices[i-1] - 1) * 100 if i > 0 else 0
-
-            records.append({
-                "date": date.strftime("%Y-%m-%d"),
-                "code": code,
-                "open": round(open_prices[i], 2),
-                "high": round(high_prices[i], 2),
-                "low": round(low_prices[i], 2),
-                "close": round(prices[i], 2),
-                "volume": volumes[i],
-                "turnover_rate": np.random.uniform(1, 10),
-                "change_pct": round(change_pct, 2),
-            })
-
-    df = pd.DataFrame(records)
-    logger.info(f"Generated {len(df)} records for {n_stocks} stocks over {n_days} days")
-
-    return df
 
 
 def detect_events(daily_data: pd.DataFrame, config: dict) -> dict:
@@ -474,24 +403,12 @@ def run_backtest(
     logger.info(f"  最大回撤: {metrics.get('max_drawdown', 0):.2%}")
     logger.info(f"  交易次数: {metrics.get('num_trades', 0)}")
 
-    # 如果有版本号，保存回测结果
+    # 如果有版本号，保存回测结果（复用上面已计算的 signals）
     if version:
-        # 构建信号 DataFrame（用于保存）
-        feature_cols = [c for c in features_df.columns
-                       if c not in ["sample_id", "code", "first_date", "label_combined", "label_short"]]
-        X = features_df[feature_cols].fillna(0)
-        proba = trainer.predict_proba(X)
-        signals_df = features_df[["first_date", "code"]].copy()
-        signals_df["score"] = proba[:, -1]
-        signals_df = signals_df.rename(columns={"first_date": "date"})
-
-        # 使用 ModelRegistry 的 update_version_with_backtest 保存完整产物
         registry = ModelRegistry(config.get("model_dir", "models"))
         archive_dir = registry.update_version_with_backtest(
-            version=version,
-            backtester=backtester,
-            metrics=metrics,
-            signals_df=signals_df,
+            version=version, backtester=backtester,
+            metrics=metrics, signals_df=signals,
         )
         if archive_dir:
             logger.info(f"回测产物已保存到: {archive_dir}")
@@ -509,6 +426,8 @@ def main():
                         help="列出所有已保存的版本")
     parser.add_argument("--model-dir", type=str, default="models",
                         help="模型保存目录")
+    parser.add_argument("--source", choices=["cache", "tdx", "auto"], default="cache",
+                        help="日线数据源：cache（默认，仅读 daily_cache） / tdx（直读通达信） / auto（cache→tdx 回退）")
     args = parser.parse_args()
 
     # 列出版本
@@ -563,65 +482,17 @@ def main():
 
     # Step 0: 加载数据
     logger.info("=" * 50)
-    logger.info("Step 0: 加载数据")
+    logger.info(f"Step 0: 加载数据 (source={args.source})")
     logger.info("=" * 50)
-
-    # 使用通达信本地数据
     try:
-        tdx_loader = TDXDataLoader(r"C:\new_tdx\vipdoc")
-        logger.info("使用通达信本地数据...")
-
-        if tdx_loader.data_path is None:
-            logger.error("未找到通达信数据目录，请检查安装路径")
-            logger.info("请设置通达信数据路径，或使用其他数据源")
-            return
-
-        # 获取股票列表（从上海和深圳）
-        stock_list_sh = tdx_loader.load_stock_list("sh")
-        stock_list_sz = tdx_loader.load_stock_list("sz")
-
-        # 过滤主板股票（涨跌幅限制10%）
-        # 主板: 600xxx, 601xxx, 603xxx (上海), 000xxx, 001xxx (深圳)
-        # 排除: 688xxx (科创板), 300xxx (创业板)
-        main_codes = []
-        for code in stock_list_sh["code"].tolist():
-            if tdx_loader.is_main_board(code):
-                main_codes.append(code)
-        for code in stock_list_sz["code"].tolist():
-            if tdx_loader.is_main_board(code):
-                main_codes.append(code)
-
-        logger.info(f"主板股票数量: {len(main_codes)}")
-
-        # 全部加载（建议根据实际数据量调整）
-        logger.info(f"准备加载 {len(main_codes)} 只股票数据...")
-
-        # 批量加载日线数据（使用配置中的日期范围）
-        data_config = config.get_section("data")
-        start_date = data_config.get("start_date", "2018-01-01")
-        end_date = data_config.get("end_date", "2023-12-31")
-        logger.info(f"数据加载范围: {start_date} ~ {end_date}")
-
-        # 为特征计算预留足够的历史窗口（pre_trend_window_2m=40天 + 缓冲）
-        from dateutil.relativedelta import relativedelta
-        history_start = (pd.Timestamp(start_date) - relativedelta(months=3)).strftime("%Y-%m-%d")
-        logger.info(f"特征历史窗口起始: {history_start}（为 pre_trend 计算预留）")
-
-        daily_data = tdx_loader.load_batch(
-            codes=main_codes,
-            start_date=history_start,
-            end_date=end_date,
-        )
-
-        if daily_data.empty:
-            logger.error("通达信数据为空，请检查数据目录")
-            return
-
-        logger.info(f"加载了 {len(daily_data)} 条日线数据")
-
-    except Exception as e:
-        logger.error(f"加载数据失败: {e}")
+        daily_data = load_daily_data(config, source=args.source)
+    except RuntimeError as exc:
+        logger.error(f"加载数据失败: {exc}")
         return
+    logger.info(
+        f"日线数据准备就绪: {len(daily_data)} 条 × "
+        f"{daily_data['code'].nunique()} 只代码"
+    )
 
     # Step 1-4: 事件检测
     events = detect_events(daily_data, full_config)

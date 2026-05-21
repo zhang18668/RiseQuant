@@ -1,8 +1,14 @@
 data:
   qlib_data_dir: "./qlib_data/cn_data"
   cache_dir: "./data/cache"
-  start_date: "2023-01-01"
-  end_date: "2026-12-31"
+  # 阶段 1.x 缓存目录（与 scripts/build_*_cache.py 默认值保持一致）
+  zt_pool_cache_dir: "./data/zt_pool_cache"
+  daily_cache_dir: "./data/daily_cache"
+  verify_dir: "./data/verify"
+  # 通达信本地数据目录（Windows 路径，请根据本机修改）
+  tdx_vipdoc: "C:/new_tdx/vipdoc"
+  start_date: "2020-01-01"
+  end_date: "2026-05-21"
 
 event:
   limit_up_threshold: 9.9

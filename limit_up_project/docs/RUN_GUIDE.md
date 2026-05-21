@@ -122,6 +122,41 @@ UserWarning: split_by_index(shuffle=True) 会打乱时间序, ...
 
 ---
 
+## 3.5 数据缓存构建（阶段 1.x）
+
+完整 pipeline 依赖三层数据缓存，建议按顺序首次构建。后续每日只需重跑同样命令即可增量更新。
+
+```
+阶段 1.2  涨停板池缓存       python scripts/build_zt_pool_cache.py
+阶段 1.3  日线数据缓存       python scripts/build_daily_cache.py
+阶段 1.4  数据一致性校验     python scripts/verify_daily_cache.py
+```
+
+**阶段 1.2 涨停板池缓存**：基于 AkShare 拉取 ``stock_zt_pool_em`` 与 ``stock_zt_pool_previous_em``，落地到 ``data/zt_pool_cache/{zt_pool, zt_pool_previous}/YYYYMMDD.parquet``。默认 2020-01-01 至今，首次约 35 分钟，日增量约 5 秒。
+
+**阶段 1.3 日线数据缓存**：默认 universe 为 ``zt_pool_relevant``（两个池里出现过的主板代码并集，~2000-3000 只），用通达信本地 ``.day`` 文件优先、AkShare 兜底，落地到 ``data/daily_cache/<code>.parquet``。常用命令：
+
+```bash
+# 默认：增量更新涨停股相关的日线
+python scripts/build_daily_cache.py
+
+# 指定数据源 / TDX 路径
+python scripts/build_daily_cache.py --source tdx --tdx-path C:/new_tdx/vipdoc
+
+# 全市场主板（更耗时，但事件检测/特征不受限）
+python scripts/build_daily_cache.py --universe all
+```
+
+**阶段 1.4 一致性校验**：对账 zt_pool 与日线缓存，覆盖度、价格一致性、涨跌幅一致性、首次封板时间分布、空文件连续段、未来函数自检。任一项未达标 ``exit 2``，输出 ``data/verify/daily_consistency_<ts>.{json,md}``。
+
+```bash
+python scripts/verify_daily_cache.py
+```
+
+只有这一阶段返回 PASS，才进入下面的端到端 pipeline。
+
+---
+
 ## 4. 跑完整 pipeline（端到端）
 
 ### 4.1 默认数据源：通达信本地数据
