@@ -140,6 +140,20 @@ def apply_post_filters(samples: pd.DataFrame, args) -> pd.DataFrame:
     return out
 
 
+def downside_summary(trades: pd.DataFrame) -> dict:
+    if trades.empty or "next_low_return_pct" not in trades.columns:
+        return {}
+    low = pd.to_numeric(trades["next_low_return_pct"], errors="coerce").dropna()
+    if low.empty:
+        return {}
+    return {
+        "next_low_mean_pct": float(low.mean()),
+        "next_low_p25_pct": float(low.quantile(0.25)),
+        "suggested_stop_loss_pct": -3.0,
+        "note": "次日低点噪声接近 -2%~-2.5%，止损建议不紧于 -3%",
+    }
+
+
 def load_market_index_akshare(symbol: str, start: str, end: str) -> pd.DataFrame:
     try:
         import akshare as ak  # type: ignore
@@ -255,6 +269,7 @@ def main() -> int:
         "close_exit_win_rate": float(trades["is_profit"].mean()) if len(trades) else None,
         "avg_close_exit_return_pct": float(trades["return_pct"].mean()) if len(trades) else None,
         "total_close_exit_pnl_per_share": float(trades["gross_pnl"].sum()) if len(trades) else None,
+        "downside_summary": downside_summary(trades),
         "outputs": {
             "candidates": str(out_dir / "candidates.csv"),
             "samples": str(out_dir / "samples.csv"),

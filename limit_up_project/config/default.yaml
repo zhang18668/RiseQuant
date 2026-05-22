@@ -7,6 +7,7 @@ data:
   verify_dir: "./data/verify"
   # 通达信本地数据目录（Windows 路径，请根据本机修改）
   tdx_vipdoc: "C:/new_tdx/vipdoc"
+  tinyshare_token: "JD3yGd8zTtlzem4t1ih7NfRV1xaf25Fi3Kjov8E3JTnN2u0B0YVFUtkaf88e641d"
   start_date: "2020-01-01"
   end_date: "2026-05-21"
 

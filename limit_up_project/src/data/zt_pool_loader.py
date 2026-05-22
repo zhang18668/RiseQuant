@@ -339,6 +339,7 @@ class ZtPoolLoader:
         save_cache: bool = True,
         refresh_empty_cache: bool = False,
         protect_non_empty_cache: bool = True,
+        write_empty_cache: bool = True,
     ) -> pd.DataFrame:
         """拉取单个交易日某类型的涨停板池数据。
 
@@ -391,6 +392,9 @@ class ZtPoolLoader:
                         f"skip empty overwrite for non-empty cache: {pool_type} {date}"
                     )
                     return cached
+            if df.empty and not write_empty_cache:
+                logger.warning(f"skip empty cache write: {pool_type} {date}")
+                return df
             df.to_parquet(cache_path, index=False)
 
         return df
@@ -405,6 +409,7 @@ class ZtPoolLoader:
         save_cache: bool = True,
         refresh_empty_cache: bool = False,
         protect_non_empty_cache: bool = True,
+        write_empty_cache: bool = True,
         skip_errors: bool = True,
         progress_every: int = 50,
     ) -> pd.DataFrame:
@@ -435,6 +440,7 @@ class ZtPoolLoader:
                     save_cache=save_cache,
                     refresh_empty_cache=refresh_empty_cache,
                     protect_non_empty_cache=protect_non_empty_cache,
+                    write_empty_cache=write_empty_cache,
                 )
             except Exception as e:  # noqa: BLE001
                 n_error += 1

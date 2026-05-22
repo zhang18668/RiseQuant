@@ -20,30 +20,128 @@
 
 ---
 
-## 1. 修复 zt_pool 缓存（最高优先级）
+## 1. 修复 zt_pool 缓存（最高优先级，**改用 tinyshare**）
 
-### 1.1 备份 + 强制全量回填
+> 2026-05-22 验证结果：akshare/eastmoney 历史接口 `rows=0`（被风控），
+> **tinyshare `limit_list_d` 一次性返回 84 行**，是唯一通的数据源。
+> 全量回填一律走 tinyshare 通道，对应脚本 `scripts/build_zt_pool_cache_tushare.py`。
 
-```bash
+### 1.1 准备 TINYSHARE_TOKEN
+
+`scripts/validate_limit_pool_sources.py` 已经验证 token 配好了（rows=84）。
+确认环境变量在你常用的 shell 里也能拿到：
+
+```powershell
+# PowerShell
+echo $env:TINYSHARE_TOKEN
+
+# 如果是空的，永久写入（仅当前用户）
+[Environment]::SetEnvironmentVariable("TINYSHARE_TOKEN", "<你的token>", "User")
+```
+
+### 1.2 现有缓存如何处理
+
+当前你的 `data/zt_pool_cache/` 状态：
+
+| 文件 | 数量 | 来源 | 列结构 |
+|---|---|---|---|
+| 15 个非空 parquet（2026-04-28~05-21）| 15 | AkShare/eastmoney | 含 `涨停价/首次封板时间/最后封板时间/炸板次数` |
+| 1652 个空 parquet（其它日期）| 1652 | AkShare 失败留下的占位 | 空 |
+
+新脚本 `write_if_needed()` 的逻辑：
+
+```python
+if path.exists() and not force_refresh and parquet 非空:
+    return "cached"            # 跳过，不调 API
+# 否则 fetch + 写入
+```
+
+所以不论选哪种回填策略，1652 个空文件都会被 tinyshare 数据覆盖。
+**唯一的差别在 15 个非空 AkShare 文件**：保留还是用 tinyshare 重写。
+
+### 1.3 推荐：强制全量重拉（列结构统一）
+
+```powershell
 cd G:\AI\RiseQuant\limit_up_project
 
-# 1) 先备份当前空文件目录（防止回滚）
-mv data\zt_pool_cache data\zt_pool_cache.bak_20260522
-
-# 2) 全量重拉 2020-01-01 ~ 今天（zt_pool + zt_pool_previous）
-python scripts\build_zt_pool_cache.py ^
-    --start 20200101 ^
-    --end   20260522 ^
-    --pool both ^
-    --force-refresh ^
-    --request-interval 0.25 ^
-    --max-retries 5 ^
-    --assert-monthly-non-empty ^
+python scripts\build_zt_pool_cache_tushare.py `
+    --start 20200101 `
+    --end   20260522 `
+    --pool both `
+    --workers 4 `
+    --rate-limit-per-min 120 `
+    --force-refresh `
+    --assert-monthly-non-empty `
     --min-monthly-non-empty 18
 ```
 
-> `--force-refresh` 关键：默认是「跳过已缓存」，而你现在缓存里就是空文件，所以必须强制覆盖。
-> 也可用 `--refresh-empty-only` 仅替换空文件，保留 4-28 之后已有数据。
+为什么推荐这个：
+- 多调用 ~45 次接口（多 ~30 秒），换来**所有 parquet 文件列结构 100% 一致**，dashboard
+  复盘时不会出现"前几天能看到字段，后几天看不到"的情况。
+- 不需要 `Move-Item` 备份，新脚本直接原地覆盖。
+
+参数说明：
+- 单日 3 次接口调用（`limit_list_d` + `daily` + `daily_basic`）。客户端内置滑动窗口限速器
+  会自动把**所有线程合计**调用速率压在 120 次/分钟内，**不会超额**。
+- `--workers 4` 把 HTTP RTT 隐藏在限速窗口内，总耗时收敛到 4500 调用 ÷ 120 / min ≈ **38 分钟**（限速下限）。
+  单线程顺序跑会被 RTT 拖到 ≈ 50 分钟以上。
+- 若你的 tinyshare 套餐配额不同，把 `--rate-limit-per-min` 改成对应数字即可；
+  例如付费版 500/min 写 `--rate-limit-per-min 500 --workers 8`，回填时间能压到 ~10 分钟。
+- 跑完会自动断言每月非空 ≥ 18 文件，并实时打印 ETA。
+
+### 1.4 备选方案 A：增量回填（保留 15 天 AkShare 数据）
+
+```powershell
+cd G:\AI\RiseQuant\limit_up_project
+
+# 不加 --force-refresh，已有非空文件会被跳过
+python scripts\build_zt_pool_cache_tushare.py `
+    --start 20200101 `
+    --end   20260522 `
+    --pool both `
+    --workers 4 `
+    --rate-limit-per-min 120 `
+    --assert-monthly-non-empty `
+    --min-monthly-non-empty 18
+```
+
+- 节省 ~30 秒
+- 15 天 AkShare 数据 vs 1500 天 tinyshare 数据，列字段不一致
+- 不推荐除非你确定 AkShare 那 15 天的 `首次封板时间/炸板次数` 你以后会用，但 tinyshare 不能拿到
+
+### 1.5 备选方案 B：先备份再强制重拉（保险派）
+
+```powershell
+cd G:\AI\RiseQuant\limit_up_project
+
+# 1) 备份现有目录，留作随时回滚
+Move-Item data\zt_pool_cache data\zt_pool_cache.bak_20260522
+
+# 2) 全量重拉
+python scripts\build_zt_pool_cache_tushare.py `
+    --start 20200101 --end 20260522 --pool both `
+    --workers 4 --rate-limit-per-min 120 `
+    --assert-monthly-non-empty --min-monthly-non-empty 18
+```
+
+- 备份目录占 ~5 MB（绝大多数是空 parquet）
+- 出问题可以 `Move-Item data\zt_pool_cache.bak_20260522 data\zt_pool_cache` 一键回滚
+
+### 1.6 完成后立即校验
+
+```powershell
+python -c "from pathlib import Path; import pandas as pd; ne=[p for p in sorted(Path('data/zt_pool_cache/zt_pool').glob('*.parquet')) if len(pd.read_parquet(p))>0]; print('non-empty:', len(ne), 'first:', ne[0].stem, 'last:', ne[-1].stem)"
+
+python -c "from pathlib import Path; import pandas as pd; ne=[p for p in sorted(Path('data/zt_pool_cache/zt_pool_previous').glob('*.parquet')) if len(pd.read_parquet(p))>0]; print('previous non-empty:', len(ne))"
+```
+
+**通过标准**：两个池子的非空文件数都接近交易日总数（约 1500+ 个），首文件是 `20200102`。
+
+### 1.7 不再使用 akshare 回填脚本
+
+`scripts/build_zt_pool_cache.py`（基于 akshare）保留代码不删，仅作为兜底；
+日常**不再调用**。`scripts/validate_limit_pool_sources.py` 已经把
+sources 列表精简到只剩 `tinyshare_limit_list_d`。
 
 ### 1.2 完成后立即校验
 
@@ -460,20 +558,29 @@ async function openTradeDetail(code, buyDate) {
 
 ---
 
-## 9. 立刻能动手的 3 条命令
+## 9. 立刻能动手的 2 条命令（tinyshare 通道，推荐项）
 
-如果只想先把"数据空"问题解决，今天就跑：
+如果只想先把"数据空"问题解决，今天就跑（无需备份，新脚本会原地覆盖空文件 + 重写非空文件）：
 
-```bash
-# 1) 回填 zt_pool
+```powershell
 cd G:\AI\RiseQuant\limit_up_project
-python scripts\build_zt_pool_cache.py --start 20200101 --end 20260522 --pool both --force-refresh --assert-monthly-non-empty
 
-# 2) 重跑研究，看样本量是否回归正常
+# 1) tinyshare 强制全量回填（4 线程并发 + 限速 120/min），约 38~45 分钟
+python scripts\build_zt_pool_cache_tushare.py `
+    --start 20200101 --end 20260522 --pool both `
+    --workers 4 --rate-limit-per-min 120 --force-refresh `
+    --assert-monthly-non-empty --min-monthly-non-empty 18
+
+# 2) 校验非空数（应该 ≈ 1500+）
+python -c "from pathlib import Path; import pandas as pd; ne=[p for p in sorted(Path('data/zt_pool_cache/zt_pool').glob('*.parquet')) if len(pd.read_parquet(p))>0]; print('non-empty:', len(ne), 'first:', ne[0].stem, 'last:', ne[-1].stem)"
+
+# 3) 重跑研究，看样本量是否回归正常（期望 > 2000）
 python scripts\run_limit_up_pullback_research.py --source cache --start 2022-01-01 --end 2026-05-21
-
-# 3) 生成股票名字典（一次性）
-python -c "import akshare as ak; df=ak.stock_info_a_code_name(); df.columns=['code','name']; df['code']=df['code'].astype(str).str.zfill(6); import pathlib; pathlib.Path('data/dict').mkdir(parents=True, exist_ok=True); df.to_parquet('data/dict/stock_name.parquet', index=False); print('ok', len(df))"
 ```
 
-跑完这 3 条，再开始 M4-M8 的分钟级 + 弹窗工程。
+如果不想强制覆盖那 15 个 AkShare 文件，把 `--force-refresh` 去掉即可（详见 §1.4）。
+
+注：第 3 步如果样本仍然偏少，说明 daily_cache 的 `turnover_rate / 流通市值` 还是空的——
+跳到 §2 写一次 enrich_daily_cache 再回头跑研究脚本即可。
+
+跑完这 3 条，再开始 M3-M8 的字典 + 分钟级 + 弹窗工程。

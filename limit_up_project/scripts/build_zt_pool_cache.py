@@ -103,6 +103,10 @@ def parse_args() -> argparse.Namespace:
         help="只重拉缺失或空 parquet，保留已有非空缓存"
     )
     p.add_argument(
+        "--no-write-empty", action="store_true",
+        help="联网返回空表时不写空 parquet，避免把接口失败固化成缓存"
+    )
+    p.add_argument(
         "--assert-monthly-non-empty", action="store_true",
         help="回填完成后断言每月非空文件数达标"
     )
@@ -124,7 +128,8 @@ def fmt_summary(s: dict) -> str:
 
 
 def run_one(loader: ZtPoolLoader, pool_type: str, start: str, end: str,
-            force: bool, refresh_empty_only: bool = False) -> dict:
+            force: bool, refresh_empty_only: bool = False,
+            write_empty_cache: bool = True) -> dict:
     """拉取单个池子的区间数据，返回统计信息。"""
     print("\n" + "=" * 70)
     print(f"开始拉取池: {pool_type}")
@@ -141,6 +146,7 @@ def run_one(loader: ZtPoolLoader, pool_type: str, start: str, end: str,
         save_cache=True,
         refresh_empty_cache=refresh_empty_only,
         protect_non_empty_cache=True,
+        write_empty_cache=write_empty_cache,
         skip_errors=True,
         progress_every=50,
     )
@@ -181,7 +187,15 @@ def main() -> int:
     types_to_run = SUPPORTED_TYPES if args.pool == "both" else (args.pool,)
     for t in types_to_run:
         try:
-            run_one(loader, t, args.start, args.end, args.force_refresh, args.refresh_empty_only)
+            run_one(
+                loader,
+                t,
+                args.start,
+                args.end,
+                args.force_refresh,
+                args.refresh_empty_only,
+                not args.no_write_empty,
+            )
         except KeyboardInterrupt:
             print(f"\n[INTERRUPTED] 在 {t} 拉取过程中被中断，已缓存的数据保留")
             return 130
