@@ -58,6 +58,7 @@ from src.data.zt_pool_loader import (  # noqa: E402
     ZT_POOL_TYPE,
     ZT_PREV_TYPE,
     SUPPORTED_TYPES,
+    assert_zt_pool_cache_quality,
 )
 
 
@@ -97,6 +98,18 @@ def parse_args() -> argparse.Namespace:
         "--force-refresh", action="store_true",
         help="强制重新拉取（忽略已有缓存）"
     )
+    p.add_argument(
+        "--refresh-empty-only", action="store_true",
+        help="只重拉缺失或空 parquet，保留已有非空缓存"
+    )
+    p.add_argument(
+        "--assert-monthly-non-empty", action="store_true",
+        help="回填完成后断言每月非空文件数达标"
+    )
+    p.add_argument(
+        "--min-monthly-non-empty", type=int, default=18,
+        help="每月最少非空缓存文件数，默认 18"
+    )
     return p.parse_args()
 
 
@@ -111,7 +124,7 @@ def fmt_summary(s: dict) -> str:
 
 
 def run_one(loader: ZtPoolLoader, pool_type: str, start: str, end: str,
-            force: bool) -> dict:
+            force: bool, refresh_empty_only: bool = False) -> dict:
     """拉取单个池子的区间数据，返回统计信息。"""
     print("\n" + "=" * 70)
     print(f"开始拉取池: {pool_type}")
@@ -126,6 +139,8 @@ def run_one(loader: ZtPoolLoader, pool_type: str, start: str, end: str,
         pool_type=pool_type,
         use_cache=not force,
         save_cache=True,
+        refresh_empty_cache=refresh_empty_only,
+        protect_non_empty_cache=True,
         skip_errors=True,
         progress_every=50,
     )
@@ -147,6 +162,7 @@ def main() -> int:
     print(f"  池子: {args.pool}")
     print(f"  缓存: {args.cache_dir}")
     print(f"  强制刷新: {args.force_refresh}")
+    print(f"  仅刷新空文件: {args.refresh_empty_only}")
     print("=" * 70)
 
     loader = ZtPoolLoader(
@@ -165,7 +181,7 @@ def main() -> int:
     types_to_run = SUPPORTED_TYPES if args.pool == "both" else (args.pool,)
     for t in types_to_run:
         try:
-            run_one(loader, t, args.start, args.end, args.force_refresh)
+            run_one(loader, t, args.start, args.end, args.force_refresh, args.refresh_empty_only)
         except KeyboardInterrupt:
             print(f"\n[INTERRUPTED] 在 {t} 拉取过程中被中断，已缓存的数据保留")
             return 130
@@ -179,6 +195,21 @@ def main() -> int:
     print("=" * 70)
     for t in SUPPORTED_TYPES:
         print(fmt_summary(loader.cache_summary(t)))
+
+    if args.assert_monthly_non_empty:
+        print("\n缓存质量断言：")
+        for t in types_to_run:
+            quality = assert_zt_pool_cache_quality(
+                cache_dir=args.cache_dir,
+                start_date=args.start,
+                end_date=args.end,
+                pool_type=t,
+                min_monthly_non_empty=args.min_monthly_non_empty,
+            )
+            print(
+                f"  [{t}] PASS non_empty={quality['non_empty']} "
+                f"files={quality['files']} missing={quality['missing']}"
+            )
 
     print("\n下一步：进入阶段 1.3（日线数据回溯）+ 阶段 1.4（数据一致性校验）")
     return 0

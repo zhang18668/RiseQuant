@@ -1,0 +1,38 @@
+{
+  "start": "2026-05-01",
+  "end": "2026-05-21",
+  "source": "cache",
+  "market_source": "proxy",
+  "market_index": "000001",
+  "params": {
+    "limit_return_min": 0.095,
+    "confirm_return_max": 0.05,
+    "confirm_high_return_max": 0.08,
+    "turnover_min": 3.0,
+    "turnover_max": 10.0,
+    "require_turnover_rate": true,
+    "use_market_cap_turnover_tiers": true,
+    "require_shadow": true,
+    "volume_ratio_min": 1.0,
+    "limit_gap_days": 2,
+    "close_eq_high_tol": 0.001,
+    "next_high_target": 0.03,
+    "require_market_filter": true,
+    "market_ma_window": 5,
+    "market_ret_min": -0.015
+  },
+  "num_samples": 28,
+  "num_candidates": 28,
+  "num_trades": 28,
+  "label_3_hit_rate": 0.5714285714285714,
+  "avg_next_high_return": 0.03988811511207425,
+  "close_exit_win_rate": 0.5,
+  "avg_close_exit_return_pct": 0.9272773596172974,
+  "total_close_exit_pnl_per_share": 12.309999999999958,
+  "outputs": {
+    "candidates": "models\\rule_limit_up_pullback_research\\run_20260522_152054\\candidates.csv",
+    "samples": "models\\rule_limit_up_pullback_research\\run_20260522_152054\\samples.csv",
+    "trades": "models\\rule_limit_up_pullback_research\\run_20260522_152054\\trades.csv",
+    "factor_group_stats": "models\\rule_limit_up_pullback_research\\run_20260522_152054\\factor_group_stats.csv"
+  }
+}

@@ -44,6 +44,14 @@ class ModelInfo:
         return self.artifact("signals.csv").exists()
 
     @property
+    def has_samples(self) -> bool:
+        return self.artifact("samples.csv").exists()
+
+    @property
+    def has_candidates(self) -> bool:
+        return self.artifact("candidates.csv").exists()
+
+    @property
     def has_trades(self) -> bool:
         return self.artifact("trades.csv").exists()
 
@@ -64,9 +72,12 @@ class ModelInfo:
             "path": str(self.path),
             "has_model": self.artifact("model.pkl").exists() or self.artifact("limit_up_lgbm.pkl").exists(),
             "has_signals": self.has_signals,
+            "has_samples": self.has_samples,
+            "has_candidates": self.has_candidates,
             "has_trades": self.has_trades,
             "has_equity": self.artifact("equity_curve.csv").exists(),
             "metrics": metrics,
+            "summary": summary,
         }
 
 
@@ -183,8 +194,8 @@ def discover_models() -> list[ModelInfo]:
 
     models.sort(
         key=lambda m: (
-            1 if (m.has_signals and m.has_trades) else 0,
-            1 if m.has_signals else 0,
+            1 if ((m.has_samples or m.has_signals) and m.has_trades) else 0,
+            1 if (m.has_samples or m.has_signals) else 0,
             str(m.trained_at or m.version),
         ),
         reverse=True,
@@ -199,13 +210,118 @@ def get_model(model_id: str | None) -> ModelInfo | None:
             if model.id == model_id:
                 return model
     for model in models:
-        if model.has_signals:
+        if model.has_samples or model.has_signals:
             return model
     return models[0] if models else None
 
 
 def unique_sorted_dates(rows: list[dict[str, Any]]) -> list[str]:
     return sorted({str(r.get("date", ""))[:10] for r in rows if r.get("date")})
+
+
+def first_value(row: dict[str, Any], names: list[str], default: Any = "") -> Any:
+    for name in names:
+        value = row.get(name)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def as_bool(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "是"}
+
+
+def research_for_model(model: ModelInfo, params: dict[str, list[str]]) -> dict[str, Any]:
+    candidate_path = model.artifact("candidates.csv")
+    sample_path = model.artifact("samples.csv")
+    trade_path = model.artifact("trades.csv")
+    candidates = read_csv_rows(candidate_path if candidate_path.exists() else sample_path)
+    selected_rows = read_csv_rows(sample_path)
+    trades = read_csv_rows(trade_path)
+
+    selected_keys = {
+        (str(r.get("date", ""))[:10], str(r.get("code", "")).zfill(6))
+        for r in selected_rows
+    }
+    trade_by_key = {
+        (str(r.get("buy_date", ""))[:10], str(r.get("code", "")).zfill(6)): r
+        for r in trades
+    }
+
+    dates = unique_sorted_dates(candidates)
+    verified_dates = sorted({
+        str(r.get("date", ""))[:10]
+        for r in candidates
+        if str(r.get("next_date", ""))[:10]
+    })
+    selected_date = params.get("date", [""])[0] or (
+        verified_dates[-1] if verified_dates else (dates[-1] if dates else "")
+    )
+    mode = params.get("mode", ["all"])[0]
+    top = int(as_float(params.get("top", ["500"])[0], 500))
+
+    rows: list[dict[str, Any]] = []
+    for row in candidates:
+        row_date = str(row.get("date", ""))[:10]
+        code = str(row.get("code", "")).zfill(6)
+        if row_date != selected_date:
+            continue
+        selected = (row_date, code) in selected_keys or as_bool(row.get("selected_after_factors"))
+        if mode == "selected" and not selected:
+            continue
+        if mode == "candidate" and selected:
+            continue
+
+        trade = trade_by_key.get((row_date, code), {})
+        buy_price = as_float(first_value(row, ["buy_price", "close"]))
+        next_high_return = as_float(row.get("next_high_return"))
+        next_close_return = as_float(row.get("next_close_return"))
+        next_date = str(row.get("next_date", ""))[:10]
+        has_next = bool(next_date)
+        fallback_sell_price = buy_price * (1.0 + next_close_return) if has_next else None
+        fallback_pnl = fallback_sell_price - buy_price if fallback_sell_price is not None else None
+        rows.append(
+            {
+                "date": row_date,
+                "code": code,
+                "name": str(first_value(row, ["name", "limit_pool_name"], stock_name(code))),
+                "selected_after_factors": selected,
+                "limit_date": str(row.get("limit_date", ""))[:10],
+                "wash_date": str(row.get("wash_date", ""))[:10],
+                "t_close": buy_price,
+                "buy_price": buy_price,
+                "next_date": next_date,
+                "target_hit": as_bool(first_value(trade, ["target_hit"], row.get("label_3"))) if has_next else None,
+                "target_high_return_pct": as_float(first_value(trade, ["target_high_return_pct"], next_high_return * 100)) if has_next else None,
+                "next_close_return_pct": as_float(first_value(trade, ["return_pct"], next_close_return * 100)) if has_next else None,
+                "sell_date": str(trade.get("sell_date", row.get("next_date", "")))[:10] if has_next else "",
+                "sell_price": as_float(trade.get("sell_price"), fallback_sell_price) if has_next else None,
+                "pnl_per_share": as_float(trade.get("gross_pnl"), fallback_pnl) if has_next else None,
+                "wash_turnover_rate": as_float(row.get("wash_turnover_rate")),
+                "wash_turnover_tier": str(row.get("wash_turnover_tier", "")),
+                "volume_ratio": as_float(row.get("volume_ratio")),
+                "limit_day_vol_ratio_5": as_float(row.get("limit_day_vol_ratio_5")),
+                "confirm_return_pct": as_float(row.get("confirm_return")) * 100,
+                "confirm_high_return_pct": as_float(row.get("confirm_high_return")) * 100,
+            }
+        )
+
+    rows.sort(key=lambda r: (not r["selected_after_factors"], -(r["target_high_return_pct"] or -999.0), r["code"]))
+    rows = rows[:top]
+    selected_count = sum(1 for r in rows if r["selected_after_factors"])
+    return {
+        "model": model.to_dict(),
+        "dates": dates[-260:],
+        "selected_date": selected_date,
+        "rows": rows,
+        "counts": {
+            "shown": len(rows),
+            "selected": selected_count,
+            "candidate": len(rows) - selected_count,
+            "target_hit": sum(1 for r in rows if r["target_hit"] is True),
+        },
+        "missing": [] if (candidate_path.exists() or sample_path.exists()) else ["candidates.csv", "samples.csv"],
+    }
 
 
 def signals_for_model(model: ModelInfo, params: dict[str, list[str]]) -> dict[str, Any]:
@@ -402,6 +518,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         if path == "/api/signals":
             self.send_json(signals_for_model(model, params))
+        elif path == "/api/research":
+            self.send_json(research_for_model(model, params))
         elif path == "/api/trades":
             self.send_json(trades_for_model(model, params))
         elif path == "/api/kline":

@@ -48,6 +48,96 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _read_parquet_if_non_empty(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+    return df if df is not None and not df.empty else pd.DataFrame()
+
+
+def zt_pool_cache_quality(
+    cache_dir: Union[str, Path],
+    start_date: str,
+    end_date: str,
+    pool_type: str = "zt_pool",
+    min_monthly_non_empty: int = 18,
+) -> dict:
+    """Summarize landed zt-pool cache health.
+
+    The important guardrail is monthly non-empty coverage.  A month with many
+    empty parquet placeholders usually means a proxy/API failure was cached as
+    "valid" data, which can silently shrink multi-year reports to a few weeks.
+    """
+    cache_dir = Path(cache_dir)
+    sub = cache_dir / pool_type
+    dates = list(_iter_workdays(start_date, end_date))
+    monthly: dict[str, dict] = {}
+    total_files = 0
+    total_non_empty = 0
+    missing = 0
+
+    for d in dates:
+        month = d[:6]
+        item = monthly.setdefault(month, {"files": 0, "non_empty": 0, "missing": 0})
+        path = sub / f"{d}.parquet"
+        if not path.exists():
+            missing += 1
+            item["missing"] += 1
+            continue
+        total_files += 1
+        item["files"] += 1
+        if not _read_parquet_if_non_empty(path).empty:
+            total_non_empty += 1
+            item["non_empty"] += 1
+
+    bad_months = [
+        {"month": month, **stats}
+        for month, stats in sorted(monthly.items())
+        if stats["non_empty"] < min_monthly_non_empty
+    ]
+    return {
+        "pool_type": pool_type,
+        "start_date": start_date,
+        "end_date": end_date,
+        "min_monthly_non_empty": min_monthly_non_empty,
+        "expected_workdays": len(dates),
+        "files": total_files,
+        "non_empty": total_non_empty,
+        "missing": missing,
+        "monthly": monthly,
+        "bad_months": bad_months,
+        "ok": not bad_months,
+    }
+
+
+def assert_zt_pool_cache_quality(
+    cache_dir: Union[str, Path],
+    start_date: str,
+    end_date: str,
+    pool_type: str = "zt_pool",
+    min_monthly_non_empty: int = 18,
+) -> dict:
+    summary = zt_pool_cache_quality(
+        cache_dir=cache_dir,
+        start_date=start_date,
+        end_date=end_date,
+        pool_type=pool_type,
+        min_monthly_non_empty=min_monthly_non_empty,
+    )
+    if not summary["ok"]:
+        preview = ", ".join(
+            f"{m['month']}={m['non_empty']}" for m in summary["bad_months"][:8]
+        )
+        raise RuntimeError(
+            f"{pool_type} cache quality failed: monthly non-empty files < "
+            f"{min_monthly_non_empty}; bad months: {preview}"
+        )
+    return summary
+
+
 # ---------------------------- 常量 ----------------------------
 ZT_POOL_TYPE = "zt_pool"
 ZT_PREV_TYPE = "zt_pool_previous"
@@ -191,6 +281,10 @@ class ZtPoolLoader:
         """检查某日某类型数据是否已缓存。"""
         return self._cache_path(pool_type, date).exists()
 
+    def is_non_empty_cached(self, pool_type: str, date: str) -> bool:
+        """Return True only when the landed parquet exists and has rows."""
+        return not _read_parquet_if_non_empty(self._cache_path(pool_type, date)).empty
+
     def cache_summary(self, pool_type: str = ZT_POOL_TYPE) -> dict:
         """汇总某类型缓存文件统计：数量、日期范围、占用空间。"""
         sub = self.cache_dir / pool_type
@@ -243,6 +337,8 @@ class ZtPoolLoader:
         pool_type: str = ZT_POOL_TYPE,
         use_cache: bool = True,
         save_cache: bool = True,
+        refresh_empty_cache: bool = False,
+        protect_non_empty_cache: bool = True,
     ) -> pd.DataFrame:
         """拉取单个交易日某类型的涨停板池数据。
 
@@ -255,7 +351,9 @@ class ZtPoolLoader:
         cache_path = self._cache_path(pool_type, date)
 
         if use_cache and cache_path.exists():
-            return pd.read_parquet(cache_path)
+            cached = pd.read_parquet(cache_path)
+            if not refresh_empty_cache or not cached.empty:
+                return cached
 
         api = self._api_for(pool_type)
         last_err: Optional[Exception] = None
@@ -286,6 +384,13 @@ class ZtPoolLoader:
 
         if save_cache:
             # 空 DataFrame 也写入，作为"已确认无数据"的占位（防止反复拉取非交易日）
+            if df.empty and protect_non_empty_cache and cache_path.exists():
+                cached = _read_parquet_if_non_empty(cache_path)
+                if not cached.empty:
+                    logger.warning(
+                        f"skip empty overwrite for non-empty cache: {pool_type} {date}"
+                    )
+                    return cached
             df.to_parquet(cache_path, index=False)
 
         return df
@@ -298,6 +403,8 @@ class ZtPoolLoader:
         pool_type: str = ZT_POOL_TYPE,
         use_cache: bool = True,
         save_cache: bool = True,
+        refresh_empty_cache: bool = False,
+        protect_non_empty_cache: bool = True,
         skip_errors: bool = True,
         progress_every: int = 50,
     ) -> pd.DataFrame:
@@ -326,6 +433,8 @@ class ZtPoolLoader:
                     pool_type=pool_type,
                     use_cache=use_cache,
                     save_cache=save_cache,
+                    refresh_empty_cache=refresh_empty_cache,
+                    protect_non_empty_cache=protect_non_empty_cache,
                 )
             except Exception as e:  # noqa: BLE001
                 n_error += 1
