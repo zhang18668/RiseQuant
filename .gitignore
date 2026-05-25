@@ -2,3 +2,4 @@
 .venv/
 .idea/
 /webui/node_modules/
+/limit_up_project/data/

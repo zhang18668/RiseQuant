@@ -1,9 +1,0 @@
-{
-  "min_score": 0.58,
-  "topk": 3,
-  "sell_n": 6,
-  "trailing_stop": 0.05,
-  "take_profit": 0.0,
-  "max_entry_over_first_close": 0.08,
-  "scale_in_steps": 2
-}
